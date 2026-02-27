@@ -2,7 +2,11 @@
 
 ## Runtime Model
 
-A container run with `--security-opt label=disable -v /:/host:ro` plus a writable output mount that inspects the host via `/host`. The container is a packaging convenience — the tool needs full read access to the host filesystem, so SELinux label enforcement is disabled. This is clean — no contamination of the source system, no installation required, and it naturally separates the tool from the thing being inspected.
+A container run with `--pid=host --privileged --security-opt label=disable -v /:/host:ro` plus a writable output mount that inspects the host via `/host`. The container is a packaging convenience — the tool needs full read access to the host filesystem, so SELinux label enforcement is disabled.
+
+`--pid=host` and `--privileged` are required for baseline generation: the tool uses `nsenter -t 1 -m -u -i -n` to execute `podman` in the host's namespaces, querying the target bootc base image for its package list and systemd presets. Without these flags, the tool still runs but falls back to all-packages mode (no baseline subtraction). See [Baseline Generation](#baseline-generation) for details.
+
+This is clean — no contamination of the source system, no installation required, and it naturally separates the tool from the thing being inspected.
 
 Output goes to a mounted volume that becomes either local files, a local git repo, or gets pushed to GitHub via the API.
 
@@ -199,7 +203,7 @@ The tool generates its package baseline by querying the target bootc base image 
 2. **Select the target base image.** Map the detected host to the corresponding bootc base image:
    - RHEL 9.x → `registry.redhat.io/rhel9/rhel-bootc:9.x`
    - CentOS Stream 9 → `quay.io/centos-bootc/centos-bootc:stream9`
-3. **Query the base image package list.** Run `podman run --rm <base-image> rpm -qa --queryformat '%{NAME}\n'` to get the concrete set of packages in the base image. This is the authoritative baseline — it's the actual content of the image the Containerfile's `FROM` line references.
+3. **Query the base image package list.** Run `podman run --rm --cgroups=disabled <base-image> rpm -qa --queryformat '%{NAME}\n'` to get the concrete set of packages in the base image. Since the tool runs inside a container, it uses `nsenter -t 1 -m -u -i -n` to execute `podman` in the host's namespaces (this is why `--pid=host` and `--privileged` are required on the outer container). `--cgroups=disabled` avoids cgroup permission issues in the nsenter context. This is the authoritative baseline — it's the actual content of the image the Containerfile's `FROM` line references.
 4. **Diff against host.** Compare the host's installed package names against the base image's package list. Packages on the host but not in the base image are "added" (go into `dnf install`). Packages in the base image but not on the host are "removed" (rare, noted in the audit report).
 5. **Cache in the snapshot.** The base image package list is stored in `inspection-snapshot.json` so re-renders via `--from-snapshot` don't need to pull the image again.
 
@@ -495,13 +499,13 @@ The build runs with `--no-cache` to ensure a clean test. On success, the tool re
 
 The resulting image is not pushed or deployed — it's a local build test only. The operator is expected to review, refine, and rebuild before deployment.
 
-Note: validation requires either `podman` available in the tool container (it already is for the container inspector) or access to the host's podman via the socket. It also requires network access to pull the base image and install packages, so it won't work in fully air-gapped runs without a pre-pulled base image.
+Note: validation requires access to the host's podman (via `nsenter`, same mechanism as baseline generation). It also requires network access to pull the base image and install packages, so it won't work in fully air-gapped runs without a pre-pulled base image.
 
 ## Implementation Language
 
 Python makes the most sense — it's available in UBI base images, has good libraries for all of this (`rpm` bindings, `GitPython`, `PyGithub`, `jinja2` for templating the Containerfile), and is readable enough that the heuristic logic in the non-RPM inspector is maintainable.
 
-The tool container is based on UBI and includes the inspection dependencies (`rpm`, `systemd` tools, `podman` CLI for container inspection, `binutils` for `readelf`, `file` for binary type detection). Target: `quay.io/yourorg/rhel2bootc:latest`.
+The tool container is based on Fedora and includes the inspection dependencies (`systemd` tools, `binutils` for `readelf`, `file` for binary type detection). `podman` is not installed in the tool container — it is accessed on the host via `nsenter` (see [Runtime Model](#runtime-model)). Target: `quay.io/yourorg/rhel2bootc:latest`.
 
 ## Future Work
 
