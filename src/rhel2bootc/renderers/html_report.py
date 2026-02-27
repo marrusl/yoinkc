@@ -332,6 +332,11 @@ th { color: var(--muted); font-weight: 500; }
 .file-viewer-panel .file-path { color: var(--muted); font-size: 0.85rem; margin-bottom: 0.5rem; }
 .file-viewer-panel .file-content-pre { max-height: 65vh; margin: 0; }
 .file-content-hidden { display: none; }
+.diff-view { max-height: 300px; overflow: auto; font-size: 0.85em; line-height: 1.5; background: #0d1117; padding: 0.5rem; border-radius: 4px; }
+.diff-add { color: #3fb950; background: rgba(46,160,67,0.15); display: block; }
+.diff-del { color: #f85149; background: rgba(248,81,73,0.15); display: block; }
+.diff-hdr { color: #8b949e; display: block; font-weight: bold; }
+.diff-hunk { color: #79c0ff; display: block; }
 .summary-hero { font-size: 1.1rem; margin-bottom: 1.5rem; color: var(--muted); }
 .summary-meta { display: grid; gap: 0.5rem; margin-bottom: 1.5rem; padding: 1rem; background: #0d1117; border-radius: 8px; border: 1px solid #30363d; }
 .summary-meta dt { color: var(--muted); font-size: 0.85rem; margin-top: 0.5rem; }
@@ -492,8 +497,23 @@ th { color: var(--muted); font-weight: 500; }
         for f in snapshot.config.files:
             diff_cell = ""
             if f.diff_against_rpm:
-                escaped = f.diff_against_rpm.replace("<", "&lt;").replace(">", "&gt;")[:2000]
-                diff_cell = f'<pre style="max-height:200px;overflow:auto;font-size:0.85em">{escaped}</pre>'
+                diff_lines = f.diff_against_rpm.splitlines()[:80]
+                colored = []
+                for dl in diff_lines:
+                    escaped_line = dl.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    if dl.startswith("+++") or dl.startswith("---"):
+                        colored.append(f'<span class="diff-hdr">{escaped_line}</span>')
+                    elif dl.startswith("@@"):
+                        colored.append(f'<span class="diff-hunk">{escaped_line}</span>')
+                    elif dl.startswith("+"):
+                        colored.append(f'<span class="diff-add">{escaped_line}</span>')
+                    elif dl.startswith("-"):
+                        colored.append(f'<span class="diff-del">{escaped_line}</span>')
+                    else:
+                        colored.append(escaped_line)
+                if len(f.diff_against_rpm.splitlines()) > 80:
+                    colored.append(f'<span class="diff-hdr">... {len(f.diff_against_rpm.splitlines()) - 80} more lines</span>')
+                diff_cell = '<pre class="diff-view">' + "\n".join(colored) + "</pre>"
             flags_cell = f"<code>{f.rpm_va_flags}</code>" if f.rpm_va_flags else ""
             html_parts.append(f"<tr><td><code>{f.path}</code></td><td>{f.kind.value}</td><td>{flags_cell}</td><td>{diff_cell}</td></tr>")
         html_parts.append("</tbody></table>")

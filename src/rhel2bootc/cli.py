@@ -48,15 +48,6 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Path to a newline-separated list of package names for air-gapped "
              "environments where the base image cannot be queried via podman.",
     )
-    parser.add_argument(
-        "--profile",
-        type=str,
-        metavar="NAME",
-        help="(Secondary) Use comps-based profile baseline instead of base image "
-             "comparison.  Useful for planning reports showing packages added "
-             "beyond a specific install profile.",
-    )
-
     # Opt-in deeper inspection (design doc)
     parser.add_argument(
         "--config-diffs",

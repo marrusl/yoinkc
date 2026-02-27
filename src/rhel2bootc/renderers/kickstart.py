@@ -59,6 +59,42 @@ def render(
         lines.append(f"# network --hostname={hostname}")
         lines.append("")
 
+    # Static routes and policy routing
+    if snapshot.network and snapshot.network.static_routes:
+        lines.append("# --- Static routes detected ---")
+        lines.append("# These were active on the source host. Add to NM connection or kickstart.")
+        for r in snapshot.network.static_routes:
+            dest = r.get("to", "")
+            via = r.get("via", "")
+            dev = r.get("dev", "")
+            if dest and via:
+                lines.append(f"# route --device={dev or 'eth0'} --dest={dest} --gateway={via}")
+            elif dest:
+                lines.append(f"# route add {dest} dev {dev or 'eth0'}")
+        lines.append("")
+
+    if snapshot.network and snapshot.network.ip_rules:
+        policy_rules = [r for r in snapshot.network.ip_rules if r.strip()]
+        if policy_rules:
+            lines.append("# --- Policy routing rules detected ---")
+            for r in policy_rules[:10]:
+                lines.append(f"# ip rule: {r}")
+            lines.append("")
+
+    # Environment variables (proxy, etc.)
+    if snapshot.network and snapshot.network.proxy:
+        lines.append("# --- Proxy environment variables ---")
+        lines.append("# Deploy-time: set via systemd drop-in or environment file.")
+        lines.append("%post")
+        lines.append("cat > /etc/environment.d/proxy.conf << 'PROXYEOF'")
+        for p in snapshot.network.proxy:
+            var_line = p.get("line", "")
+            if "=" in var_line:
+                lines.append(var_line)
+        lines.append("PROXYEOF")
+        lines.append("%end")
+        lines.append("")
+
     lines.append("# --- Examples ---")
     lines.append("# network --bootproto=dhcp --device=eth0")
     lines.append("# network --hostname=myhost.example.com")
@@ -71,10 +107,29 @@ def render(
         if nfs_mounts or cifs_mounts:
             lines.append("# --- Remote filesystem mounts detected ---")
             for m in nfs_mounts:
-                lines.append(f"# NFS: {m.get('device') or ''} → {m.get('mount_point') or ''}")
+                dev = m.get("device") or ""
+                mp = m.get("mount_point") or ""
+                opts = m.get("options") or ""
+                lines.append(f"# NFS: {dev} → {mp}")
+                if "sec=" in opts:
+                    lines.append(f"#   mount options include Kerberos auth: {opts}")
+                else:
+                    lines.append(f"#   FIXME: provide NFS credentials at deploy time")
             for m in cifs_mounts:
-                lines.append(f"# CIFS: {m.get('device') or ''} → {m.get('mount_point') or ''}")
-            lines.append("# Provide NFS/CIFS credentials at deploy time via secret injection.")
+                dev = m.get("device") or ""
+                mp = m.get("mount_point") or ""
+                lines.append(f"# CIFS: {dev} → {mp}")
+                lines.append(f"#   FIXME: provide CIFS credentials (username/password) at deploy time")
+            lines.append("")
+            lines.append("# Mount remote filesystems in %post or via systemd .mount units:")
+            lines.append("%post")
+            for m in nfs_mounts:
+                lines.append(f"# mkdir -p {m.get('mount_point', '/mnt/nfs')}")
+                lines.append(f"# echo '{m.get('device', '')} {m.get('mount_point', '')} nfs defaults 0 0' >> /etc/fstab")
+            for m in cifs_mounts:
+                lines.append(f"# mkdir -p {m.get('mount_point', '/mnt/cifs')}")
+                lines.append(f"# echo '{m.get('device', '')} {m.get('mount_point', '')} cifs credentials=/etc/samba/creds 0 0' >> /etc/fstab")
+            lines.append("%end")
             lines.append("")
 
     (output_dir / "kickstart-suggestion.ks").write_text("\n".join(lines))

@@ -80,6 +80,38 @@ def query_base_image_packages(
 
 
 # ---------------------------------------------------------------------------
+# Query the base image for systemd preset files
+# ---------------------------------------------------------------------------
+
+def query_base_image_presets(
+    executor,
+    base_image: str,
+) -> Optional[str]:
+    """Dump all systemd preset content from the base image.
+
+    Returns the concatenated text of all ``/usr/lib/systemd/system-preset/*.preset``
+    files, or None on failure.
+    """
+    cmd = [
+        "podman", "run", "--rm", base_image,
+        "bash", "-c", "cat /usr/lib/systemd/system-preset/*.preset 2>/dev/null || true",
+    ]
+    _debug(f"querying base image presets: {' '.join(cmd)}")
+    result = executor(cmd)
+    if result.returncode != 0:
+        _debug(f"preset query failed (rc={result.returncode}): "
+               f"{result.stderr.strip()[:200]}")
+        return None
+    text = result.stdout.strip()
+    if not text:
+        _debug("base image returned no preset data")
+        return None
+    lines = text.splitlines()
+    _debug(f"base image presets: {len(lines)} lines")
+    return result.stdout
+
+
+# ---------------------------------------------------------------------------
 # Load a pre-built package list file (--baseline-packages)
 # ---------------------------------------------------------------------------
 

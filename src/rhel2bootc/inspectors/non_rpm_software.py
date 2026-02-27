@@ -31,10 +31,35 @@ def _debug(msg: str) -> None:
         print(f"[rhel2bootc] non-rpm: {msg}", file=sys.stderr)
 
 
+# Quick patterns for the default (4KB head) scan
 VERSION_PATTERNS = [
     re.compile(rb"version\s*[=:]\s*[\"']?([0-9]+\.[0-9]+(?:\.[0-9]+)?)", re.I),
     re.compile(rb"v([0-9]+\.[0-9]+(?:\.[0-9]+)?)[\s\-]"),
     re.compile(rb"([0-9]+\.[0-9]+\.[0-9]+)(?:\s|$|\))"),
+]
+
+# Extended patterns for --deep-binary-scan (full strings output)
+DEEP_VERSION_PATTERNS = VERSION_PATTERNS + [
+    # Go version string embedded by linker: "go1.21.5"
+    re.compile(rb"go([0-9]+\.[0-9]+(?:\.[0-9]+)?)\b"),
+    # Rust version: "rustc 1.75.0"
+    re.compile(rb"rustc\s+([0-9]+\.[0-9]+\.[0-9]+)"),
+    # Common build metadata: "Built with X 1.2.3", "Compiled against 1.2.3"
+    re.compile(rb"(?:built|compiled|linked)\s+(?:with|against)\s+\S+\s+([0-9]+\.[0-9]+\.[0-9]+)", re.I),
+    # Release/tag pattern: "release-1.2.3", "tag/v1.2.3"
+    re.compile(rb"(?:release|tag)[/\-]v?([0-9]+\.[0-9]+\.[0-9]+)"),
+    # Semantic version with pre-release: "1.2.3-beta.1"
+    re.compile(rb"([0-9]+\.[0-9]+\.[0-9]+[\-][a-zA-Z0-9.]+)"),
+    # Git describe: "v1.2.3-45-gabcdef"
+    re.compile(rb"v([0-9]+\.[0-9]+\.[0-9]+)-[0-9]+-g[0-9a-f]+"),
+    # OpenSSL-style: "OpenSSL 3.0.12"
+    re.compile(rb"(?:OpenSSL|LibreSSL|BoringSSL)\s+([0-9]+\.[0-9]+\.[0-9]+[a-z]?)", re.I),
+    # Java: "java version \"17.0.5\""
+    re.compile(rb"java\s+version\s+[\"']([0-9]+\.[0-9]+\.[0-9]+)", re.I),
+    # Node: "node v20.10.0"
+    re.compile(rb"node\s+v([0-9]+\.[0-9]+\.[0-9]+)", re.I),
+    # Python embedded version
+    re.compile(rb"Python\s+([0-9]+\.[0-9]+\.[0-9]+)"),
 ]
 
 
@@ -120,7 +145,7 @@ def _is_binary(executor: Optional[Executor], host_root: Path, path: Path) -> boo
     return result
 
 
-def _strings_version(executor: Optional[Executor], path: Path, limit_kb: Optional[int] = None) -> Optional[str]:
+def _strings_version(executor: Optional[Executor], path: Path, limit_kb: Optional[int] = None, deep: bool = False) -> Optional[str]:
     if not executor:
         return None
     if limit_kb:
@@ -131,7 +156,8 @@ def _strings_version(executor: Optional[Executor], path: Path, limit_kb: Optiona
     if r.returncode != 0:
         return None
     data = r.stdout.encode() if isinstance(r.stdout, str) else r.stdout
-    for pat in VERSION_PATTERNS:
+    patterns = DEEP_VERSION_PATTERNS if deep else VERSION_PATTERNS
+    for pat in patterns:
         m = pat.search(data)
         if m:
             return m.group(1).decode("utf-8", errors="replace").strip()
@@ -321,7 +347,7 @@ def _classify_file(
 
     if _is_binary(executor, host_root, f):
         limit = None if deep else 4
-        ver = _strings_version(executor, f, limit_kb=limit)
+        ver = _strings_version(executor, f, limit_kb=limit, deep=deep)
         if ver:
             item["version"] = ver
             item["method"] = "strings" if deep else "strings (first 4KB)"
@@ -414,7 +440,7 @@ def _scan_dirs(
                             break
                         if _is_binary(executor, host_root, f):
                             limit = None if deep else 4
-                            ver = _strings_version(executor, f, limit_kb=limit)
+                            ver = _strings_version(executor, f, limit_kb=limit, deep=deep)
                             if ver:
                                 item["version"] = ver
                                 item["method"] = "strings" if deep else "strings (first 4KB)"
@@ -448,13 +474,26 @@ def _scan_pip(section: NonRpmSoftwareSection, host_root: Path, executor: Optiona
                             name = "-".join(parts[:idx])
                             version = "-".join(parts[idx:])
                             break
-                    section.items.append({
+                    has_c_ext = False
+                    record_file = dist_info / "RECORD"
+                    try:
+                        if record_file.is_file():
+                            for rec_line in record_file.read_text().splitlines():
+                                if rec_line.strip().endswith(".so") or ".so," in rec_line:
+                                    has_c_ext = True
+                                    break
+                    except (PermissionError, OSError):
+                        pass
+                    item_dict: dict = {
                         "path": str(dist_info.relative_to(host_root)),
                         "name": name,
                         "version": version,
                         "confidence": "high",
                         "method": "pip dist-info",
-                    })
+                    }
+                    if has_c_ext:
+                        item_dict["has_c_extensions"] = True
+                    section.items.append(item_dict)
         except Exception:
             continue
 

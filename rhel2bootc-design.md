@@ -225,7 +225,7 @@ To reduce image size, pull the base image first or provide a package list via --
 
 In this mode, the Containerfile includes all installed packages rather than just the delta. The tool still performs all other inspection — config files, services, containers, non-RPM software, etc. — so it remains useful even without a baseline. The `--baseline-packages` flag accepts a path to a newline-separated list of package names for environments where `podman run` isn't available but the package list can be obtained by other means.
 
-The `--profile` flag is retained for edge cases where comps-based profile detection is useful (e.g., generating a report that shows "packages added beyond a minimal install" for planning purposes), but it is no longer the primary baseline mechanism.
+The primary baseline is always the target bootc base image.
 
 ## Secret Handling
 
@@ -474,7 +474,6 @@ The default run is optimized for speed — it covers the vast majority of system
 |---|---|---|
 | `--output-dir DIR` | `./rhel2bootc-output/` | Directory to write all output artifacts to. Created if it doesn't exist. |
 | `--baseline-packages FILE` | off | Path to a newline-separated list of package names for air-gapped environments where the base image cannot be queried via podman. |
-| `--profile NAME` | off | Use comps-based profile baseline instead of base image comparison. Useful for planning reports showing "added beyond minimal/server install." |
 | `--validate` | off | After generating output, run `podman build` against the Containerfile to verify it builds successfully. Reports build errors with context so operators can fix issues before manual review. Requires `podman` on the host or in the tool container. |
 | `--config-diffs` | off | Extract RPM defaults via `rpm2cpio` and generate line-by-line diffs for modified config files. Requires RPMs to be in local cache or downloadable from repos. |
 | `--deep-binary-scan` | off | Run full `strings` scan on unknown binaries in `/opt` and `/usr/local` for version detection. Slow on large statically-linked binaries. |

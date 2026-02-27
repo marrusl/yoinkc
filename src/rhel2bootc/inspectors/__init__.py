@@ -191,7 +191,13 @@ def run_all(
             "severity": "warning",
         })
     snapshot.config = _safe_run("config", lambda: run_config(host_root, executor, rpm_section=snapshot.rpm, rpm_owned_paths_override=None, config_diffs=config_diffs), None, w)
-    snapshot.services = _safe_run("service", lambda: run_service(host_root, executor, tool_root), None, w)
+
+    # Query base image for systemd presets (service baseline)
+    base_image_preset_text = None
+    if snapshot.rpm and snapshot.rpm.base_image and executor is not None:
+        from ..baseline import query_base_image_presets
+        base_image_preset_text = query_base_image_presets(executor, snapshot.rpm.base_image)
+    snapshot.services = _safe_run("service", lambda: run_service(host_root, executor, tool_root, base_image_preset_text=base_image_preset_text), None, w)
     snapshot.network = _safe_run("network", lambda: run_network(host_root, executor), None, w)
     snapshot.storage = _safe_run("storage", lambda: run_storage(host_root, executor), None, w)
     snapshot.scheduled_tasks = _safe_run("scheduled_tasks", lambda: run_scheduled_tasks(host_root, executor), None, w)

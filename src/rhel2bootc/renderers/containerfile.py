@@ -207,6 +207,30 @@ def _render_containerfile_content(snapshot: InspectionSnapshot) -> str:
     """
     lines = []
     base = _base_image_from_snapshot(snapshot)
+
+    # Detect pip packages with C extensions for multi-stage build
+    c_ext_pip: list = []
+    pure_pip: list = []
+    if snapshot.non_rpm_software and snapshot.non_rpm_software.items:
+        for item in snapshot.non_rpm_software.items:
+            if item.get("method") == "pip dist-info" and item.get("version"):
+                if item.get("has_c_extensions"):
+                    c_ext_pip.append((item["name"], item["version"]))
+                else:
+                    pure_pip.append((item["name"], item["version"]))
+
+    needs_multistage = bool(c_ext_pip)
+
+    if needs_multistage:
+        lines.append("# === Build stage: compile pip packages with C extensions ===")
+        lines.append(f"FROM {base} AS builder")
+        lines.append("RUN dnf install -y gcc python3-devel make && dnf clean all")
+        lines.append("RUN python3 -m venv /tmp/pip-build")
+        c_ext_pip.sort()
+        specs = " ".join(f"{n}=={v}" for n, v in c_ext_pip)
+        lines.append(f"RUN /tmp/pip-build/bin/pip install {specs}")
+        lines.append("")
+
     lines.append("# === Base Image ===")
     os_desc = "unknown"
     if snapshot.os_release:
@@ -214,6 +238,12 @@ def _render_containerfile_content(snapshot: InspectionSnapshot) -> str:
     lines.append(f"# Detected: {os_desc}")
     lines.append(f"FROM {base}")
     lines.append("")
+
+    if needs_multistage:
+        lines.append("# === Install pre-built pip packages with C extensions ===")
+        lines.append("COPY --from=builder /tmp/pip-build/lib/python3*/site-packages/ "
+                      "/usr/lib/python3*/site-packages/")
+        lines.append("")
 
     # 1. Repository Configuration
     if snapshot.rpm and snapshot.rpm.repo_files:
@@ -257,6 +287,7 @@ def _render_containerfile_content(snapshot: InspectionSnapshot) -> str:
     has_fw = net and (net.firewall_zones or net.firewall_direct_rules)
     if has_fw:
         lines.append("# === Firewall Configuration (bake into image) ===")
+        lines.append("# Option A: COPY zone XML files (preserves all settings)")
         if net.firewall_zones:
             total_rich = sum(len(z.get("rich_rules", [])) for z in net.firewall_zones)
             lines.append(f"# Detected: {len(net.firewall_zones)} zone(s)"
@@ -265,6 +296,24 @@ def _render_containerfile_content(snapshot: InspectionSnapshot) -> str:
         if net.firewall_direct_rules:
             lines.append(f"# Detected: {len(net.firewall_direct_rules)} direct rule(s)")
             lines.append("COPY config/etc/firewalld/direct.xml /etc/firewalld/direct.xml")
+        lines.append("")
+        lines.append("# Option B: firewall-cmd equivalents (alternative to COPY above)")
+        for z in (net.firewall_zones or []):
+            zone_name = z.get("name", "public")
+            for svc in (z.get("services") or []):
+                lines.append(f"# RUN firewall-offline-cmd --zone={zone_name} --add-service={svc}")
+            for port in (z.get("ports") or []):
+                lines.append(f"# RUN firewall-offline-cmd --zone={zone_name} --add-port={port}")
+            for rr in (z.get("rich_rules") or []):
+                rule_text = rr if isinstance(rr, str) else rr.get("rule", "")
+                if rule_text:
+                    lines.append(f"# RUN firewall-offline-cmd --zone={zone_name} --add-rich-rule='{rule_text}'")
+        for dr in (net.firewall_direct_rules or []):
+            ipv = dr.get("ipv", "ipv4")
+            table = dr.get("table", "filter")
+            chain = dr.get("chain", "INPUT")
+            args = dr.get("args", "")
+            lines.append(f"# RUN firewall-offline-cmd --direct --add-rule {ipv} {table} {chain} 0 {args}")
         lines.append("")
 
     # 5. Scheduled Tasks
@@ -382,7 +431,8 @@ def _render_containerfile_content(snapshot: InspectionSnapshot) -> str:
                 else:
                     lines.append(f"# FIXME: git repo at /{path} has no remote — COPY or reconstruct")
             elif method == "pip dist-info" and item.get("version"):
-                pip_packages.append((item["name"], item["version"]))
+                if not item.get("has_c_extensions"):
+                    pip_packages.append((item["name"], item["version"]))
             elif method == "pip requirements.txt":
                 lines.append(f"# FIXME: verify pip packages in /{path} install correctly from PyPI")
                 lines.append(f"COPY config/{path} /{path}")
@@ -469,8 +519,23 @@ def _render_containerfile_content(snapshot: InspectionSnapshot) -> str:
                     gid_opt = f" -g {gid}" if gid else ""
                     shell_opt = f" -s {shell}" if shell and shell != "/sbin/nologin" else ""
                     lines.append(f"RUN useradd -u {uid}{gid_opt}{shell_opt} -m {uname}")
+        if ug.sudoers_rules:
+            lines.append(f"# FIXME: {len(ug.sudoers_rules)} sudoers rule(s) detected — review and bake into /etc/sudoers.d/")
+            for rule in ug.sudoers_rules[:10]:
+                lines.append(f"#   {rule}")
+            if len(ug.sudoers_rules) > 10:
+                lines.append(f"#   ... and {len(ug.sudoers_rules) - 10} more")
+            lines.append("# RUN echo '<user> ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/<user>")
         if ug.ssh_authorized_keys_refs:
-            lines.append("# NOTE: SSH authorized_keys detected — handle manually (do not bake keys into image)")
+            lines.append(f"# FIXME: {len(ug.ssh_authorized_keys_refs)} SSH authorized_keys file(s) detected")
+            lines.append("# Do NOT bake SSH keys into the image — inject at deploy time via:")
+            lines.append("#   - cloud-init (ssh_authorized_keys)")
+            lines.append("#   - kickstart (%post with curl from metadata service)")
+            lines.append("#   - Ignition (for CoreOS/bootc systems)")
+            for ref in ug.ssh_authorized_keys_refs[:5]:
+                user = ref.get("user", "?")
+                path = ref.get("path", "?")
+                lines.append(f"#   Found: {path} (user: {user})")
         lines.append("")
 
     # 10. Kernel Configuration
@@ -552,6 +617,35 @@ def _render_containerfile_content(snapshot: InspectionSnapshot) -> str:
             lines.append("# resolv.conf: systemd-resolved — DNS assigned at deploy time")
         else:
             lines.append("# resolv.conf: hand-edited — review whether to bake into image or manage at deploy")
+
+    if net and net.hosts_additions:
+        lines.append(f"# {len(net.hosts_additions)} custom /etc/hosts entries detected")
+        lines.append("RUN cat >> /etc/hosts << 'HOSTSEOF'")
+        for h in net.hosts_additions:
+            lines.append(h)
+        lines.append("HOSTSEOF")
+
+    if net and net.proxy:
+        lines.append("# Proxy settings detected — bake as environment defaults")
+        env_lines = []
+        for p in net.proxy:
+            var_line = p.get("line", "")
+            if "=" in var_line:
+                env_lines.append(var_line)
+        if env_lines:
+            lines.append("RUN mkdir -p /etc/environment.d && cat > /etc/environment.d/proxy.conf << 'PROXYEOF'")
+            for el in env_lines:
+                lines.append(el)
+            lines.append("PROXYEOF")
+
+    if net and net.static_routes:
+        lines.append(f"# {len(net.static_routes)} static route(s) detected")
+        lines.append("# FIXME: add static routes via NM connection or nmstatectl config")
+        for r in net.static_routes[:10]:
+            dest = r.get("to", "")
+            via = r.get("via", "")
+            dev = r.get("dev", "")
+            lines.append(f"# nmcli connection modify <conn> +ipv4.routes \"{dest} {via}\" # dev={dev}")
     lines.append("")
 
     # 13. tmpfiles.d for /var structure

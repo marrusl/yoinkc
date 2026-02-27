@@ -8,6 +8,40 @@ from ..schema import ConfigFileKind, InspectionSnapshot
 from ._triage import compute_triage
 
 
+def _storage_recommendation(mount_point: str, fstype: str, device: str) -> str:
+    """Map a mount point to a migration recommendation."""
+    mp = mount_point
+    fs = fstype.lower()
+
+    if mp in ("/", "/boot", "/boot/efi"):
+        return "image-embedded (managed by bootc)"
+    if "nfs" in fs or "cifs" in fs or "glusterfs" in fs or "9p" in fs:
+        return "external storage — keep as network mount"
+    if "swap" in fs or mp == "swap" or mp == "none":
+        return "swap — configure via kernel args or systemd"
+    if mp == "/tmp" or mp == "/dev/shm":
+        return "tmpfs — ephemeral, no action"
+    if mp.startswith("/var/lib/mysql") or mp.startswith("/var/lib/pgsql") or mp.startswith("/var/lib/mongodb"):
+        return "PVC / volume mount — database storage, must persist"
+    if mp.startswith("/var/lib/containers") or mp.startswith("/var/lib/docker"):
+        return "PVC / volume mount — container storage"
+    if mp.startswith("/var/lib") or mp.startswith("/var/data"):
+        return "PVC / volume mount — application data"
+    if mp.startswith("/var/log"):
+        return "PVC / volume mount — log retention"
+    if mp.startswith("/var"):
+        return "PVC / volume mount — mutable state"
+    if mp.startswith("/home"):
+        return "PVC / volume mount — user home directories"
+    if mp.startswith("/opt"):
+        return "PVC or image-embedded — review application needs"
+    if mp.startswith("/srv"):
+        return "PVC / volume mount — served content"
+    if mp.startswith("/mnt") or mp.startswith("/media"):
+        return "external storage — removable/temporary mount"
+    return "review — determine if data is mutable or static"
+
+
 def render(
     snapshot: InspectionSnapshot,
     env: Environment,
@@ -220,13 +254,7 @@ def render(
                 dev = e.get("device") or ""
                 mp = e.get("mount_point") or ""
                 fs = e.get("fstype") or ""
-                rec = "review"
-                if any(k in mp for k in ("/var/lib", "/var/log", "/var/data")):
-                    rec = "PVC / volume mount"
-                elif "nfs" in fs.lower() or "cifs" in fs.lower():
-                    rec = "external storage"
-                elif mp in ("/", "/boot", "/boot/efi"):
-                    rec = "image-embedded (default)"
+                rec = _storage_recommendation(mp, fs, dev)
                 lines.append(f"| `{dev}` | `{mp}` | {fs} | {rec} |")
             lines.append("")
         if snapshot.storage.lvm_info:

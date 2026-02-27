@@ -20,25 +20,65 @@ def _debug(msg: str) -> None:
         print(f"[rhel2bootc] service: {msg}", file=sys.stderr)
 
 
-def _parse_preset_files(host_root: Path) -> Tuple[Set[str], Set[str], bool]:
-    """Parse systemd preset files to determine default-enabled and default-disabled services.
-
-    Reads from /usr/lib/systemd/system-preset/ (vendor) and /etc/systemd/system-preset/ (admin),
-    with /etc overriding /usr/lib (higher-priority presets come first).
-    Returns (default_enabled, default_disabled, has_disable_all).
-    has_disable_all indicates a 'disable *' catch-all was found.
-    """
+def _parse_preset_lines(lines: List[str]) -> Tuple[Set[str], Set[str], bool]:
+    """Parse preset content lines into (enabled, disabled, has_disable_all)."""
     default_enabled: Set[str] = set()
     default_disabled: Set[str] = set()
     already_matched: Set[str] = set()
     has_disable_all = False
     glob_rules: List[Tuple[str, str]] = []
 
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        action = parts[0].lower()
+        pattern = parts[1]
+
+        if "*" in pattern or "?" in pattern:
+            if pattern == "*" and action == "disable":
+                has_disable_all = True
+            glob_rules.append((action, pattern))
+            continue
+
+        if pattern in already_matched:
+            continue
+        already_matched.add(pattern)
+
+        if action == "enable":
+            default_enabled.add(pattern)
+        elif action == "disable":
+            default_disabled.add(pattern)
+
+    _debug(f"presets: {len(default_enabled)} explicit enable, "
+           f"{len(default_disabled)} explicit disable, "
+           f"disable_all={has_disable_all}, {len(glob_rules)} glob rules")
+    return default_enabled, default_disabled, has_disable_all
+
+
+def _parse_preset_files(
+    host_root: Path,
+    base_image_preset_text: Optional[str] = None,
+) -> Tuple[Set[str], Set[str], bool]:
+    """Parse systemd preset files to determine default-enabled and default-disabled services.
+
+    If *base_image_preset_text* is provided (from querying the base image), it is
+    used as the authoritative source.  Otherwise falls back to reading the host's
+    own preset files from /usr/lib/systemd/system-preset/ and /etc/systemd/system-preset/.
+    """
+    if base_image_preset_text:
+        _debug("using base image preset data for service defaults")
+        return _parse_preset_lines(base_image_preset_text.splitlines())
+
     preset_dirs = [
         host_root / "etc/systemd/system-preset",
         host_root / "usr/lib/systemd/system-preset",
     ]
-    all_files = []
+    all_lines: List[str] = []
+    file_count = 0
     for d in preset_dirs:
         try:
             if not d.exists():
@@ -50,42 +90,14 @@ def _parse_preset_files(host_root: Path) -> Tuple[Set[str], Set[str], bool]:
             entries = []
         for f in entries:
             if f.is_file() and f.suffix == ".preset":
-                all_files.append(f)
-
-    _debug(f"found {len(all_files)} preset files")
-    for preset_file in all_files:
-        try:
-            for line in preset_file.read_text().splitlines():
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                parts = line.split()
-                if len(parts) < 2:
-                    continue
-                action = parts[0].lower()
-                pattern = parts[1]
-
-                if "*" in pattern or "?" in pattern:
-                    if pattern == "*" and action == "disable":
-                        has_disable_all = True
-                    glob_rules.append((action, pattern))
+                try:
+                    all_lines.extend(f.read_text().splitlines())
+                    file_count += 1
+                except Exception:
                     continue
 
-                if pattern in already_matched:
-                    continue
-                already_matched.add(pattern)
-
-                if action == "enable":
-                    default_enabled.add(pattern)
-                elif action == "disable":
-                    default_disabled.add(pattern)
-        except Exception:
-            continue
-
-    _debug(f"presets: {len(default_enabled)} explicit enable, "
-           f"{len(default_disabled)} explicit disable, "
-           f"disable_all={has_disable_all}, {len(glob_rules)} glob rules")
-    return default_enabled, default_disabled, has_disable_all
+    _debug(f"found {file_count} preset files")
+    return _parse_preset_lines(all_lines)
 
 
 def _parse_systemctl_list_unit_files(stdout: str) -> Dict[str, str]:
@@ -180,6 +192,7 @@ def run(
     host_root: Path,
     executor: Optional[Executor],
     tool_root: Optional[Path] = None,
+    base_image_preset_text: Optional[str] = None,
 ) -> ServiceSection:
     host_root = Path(host_root)
     section = ServiceSection()
@@ -210,7 +223,9 @@ def run(
     if not current:
         return section
 
-    default_enabled, default_disabled, has_disable_all = _parse_preset_files(host_root)
+    default_enabled, default_disabled, has_disable_all = _parse_preset_files(
+        host_root, base_image_preset_text=base_image_preset_text,
+    )
 
     for unit, state in current.items():
         if not unit.endswith(".service") and not unit.endswith(".timer"):

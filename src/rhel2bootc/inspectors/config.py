@@ -6,11 +6,20 @@ When config_diffs=True, extracts original from RPM (dnf cache or host) and sets 
 
 import difflib
 import fnmatch
+import os
+import sys
 from pathlib import Path
 from typing import List, Optional, Set
 
 from ..executor import Executor
 from ..schema import ConfigFileEntry, ConfigFileKind, ConfigSection, RpmSection
+
+_DEBUG = bool(os.environ.get("RHEL2BOOTC_DEBUG", ""))
+
+
+def _debug(msg: str) -> None:
+    if _DEBUG:
+        print(f"[rhel2bootc] config: {msg}", file=sys.stderr)
 
 # ---------------------------------------------------------------------------
 # System-generated files to exclude from the "unowned" list.
@@ -159,14 +168,46 @@ def _find_rpm_in_cache(host_root: Path, package_name: str) -> Optional[Path]:
     return None
 
 
+def _download_rpm_from_repo(executor: Executor, host_root: Path, package_name: str) -> Optional[Path]:
+    """Download the RPM for *package_name* using dnf download (strategy 2).
+
+    Returns the path to the downloaded .rpm file, or None on failure.
+    """
+    if not executor:
+        return None
+    tmp_dir = "/tmp/rhel2bootc-rpm-download"
+    cmd = [
+        "dnf", "download", "--destdir", tmp_dir,
+        "--installroot", str(host_root),
+        "--releasever=/",
+        package_name,
+    ]
+    _debug(f"dnf download: {' '.join(cmd)}")
+    r = executor(cmd)
+    if r.returncode != 0:
+        _debug(f"dnf download failed (rc={r.returncode}): {r.stderr.strip()[:200]}")
+        return None
+    try:
+        tmp = Path(tmp_dir)
+        prefix = package_name + "-"
+        for rpm in tmp.glob("*.rpm"):
+            if rpm.name.startswith(prefix):
+                _debug(f"dnf download succeeded: {rpm}")
+                return rpm
+    except (PermissionError, OSError):
+        pass
+    return None
+
+
 def _extract_file_from_rpm(executor: Executor, rpm_path: Path, path_in_rpm: str) -> Optional[str]:
     """Extract a single file from RPM via rpm2cpio | cpio. path_in_rpm is e.g. etc/httpd/conf/httpd.conf."""
     if not executor:
         return None
-    # Run on host: rpm2cpio and cpio must read the RPM (path may be under /host)
-    cmd = ["sh", "-c", f"rpm2cpio {rpm_path!s} | cpio -i --to-stdout {path_in_rpm!s} 2>/dev/null"]
+    cmd = ["sh", "-c", f"rpm2cpio {rpm_path!s} | cpio -i --to-stdout ./{path_in_rpm!s} 2>/dev/null"]
+    _debug(f"extracting from RPM: {rpm_path.name} -> {path_in_rpm}")
     r = executor(cmd)
     if r.returncode != 0:
+        _debug(f"rpm2cpio extraction failed (rc={r.returncode})")
         return None
     return r.stdout
 
@@ -218,15 +259,25 @@ def run(
         diff_against_rpm = None
         if config_diffs and executor:
             pkg = _get_owning_package(executor, host_root, path) or entry.package
-            rpm_path = _find_rpm_in_cache(host_root, pkg) if pkg else None
             path_in_rpm = path.lstrip("/")
+            original = None
+
+            # Strategy 1: local dnf cache
+            rpm_path = _find_rpm_in_cache(host_root, pkg) if pkg else None
             if rpm_path:
+                _debug(f"diff: found {pkg} in cache: {rpm_path}")
                 original = _extract_file_from_rpm(executor, rpm_path, path_in_rpm)
-                if original is not None:
-                    diff_against_rpm = _unified_diff(original, content, path)
-                else:
-                    content = (content or "") + "\n# NOTE: could not retrieve RPM default for diff — full file included\n"
+
+            # Strategy 2: download from repos
+            if original is None and pkg:
+                rpm_path = _download_rpm_from_repo(executor, host_root, pkg)
+                if rpm_path:
+                    original = _extract_file_from_rpm(executor, rpm_path, path_in_rpm)
+
+            if original is not None:
+                diff_against_rpm = _unified_diff(original, content, path)
             else:
+                _debug(f"diff: could not retrieve RPM default for {path}")
                 content = (content or "") + "\n# NOTE: could not retrieve RPM default for diff — full file included\n"
         section.files.append(
             ConfigFileEntry(

@@ -39,7 +39,7 @@ def _cron_to_on_calendar(cron_expr: str) -> str:
     return "*-*-* 02:00:00"
 
 
-def _make_timer_service(name: str, cron_expr: str, path: str) -> tuple:
+def _make_timer_service(name: str, cron_expr: str, path: str, command: str = "") -> tuple:
     on_calendar = _cron_to_on_calendar(cron_expr)
     timer_content = (
         f"[Unit]\nDescription=Generated from cron: {path}\n"
@@ -47,10 +47,13 @@ def _make_timer_service(name: str, cron_expr: str, path: str) -> tuple:
         f"[Timer]\nOnCalendar={on_calendar}\nPersistent=true\n\n"
         "[Install]\nWantedBy=timers.target\n"
     )
+    if command:
+        exec_line = f"ExecStart={command}"
+    else:
+        exec_line = "ExecStart=/bin/true\n# FIXME: could not extract command from cron entry"
     service_content = (
         f"[Unit]\nDescription=Timer from cron {path}\n\n"
-        "[Service]\nType=oneshot\nExecStart=/bin/true\n"
-        "# FIXME: replace with actual command from cron\n"
+        f"[Service]\nType=oneshot\n{exec_line}\n"
     )
     return timer_content, service_content
 
@@ -64,16 +67,24 @@ def _scan_cron_file(section: ScheduledTaskSection, host_root: Path, f: Path, sou
             line = line.strip()
             if line and not line.startswith("#") and re.match(r"^[\d*]", line):
                 parts = line.split()
-                if len(parts) >= 5:
+                if len(parts) >= 6:
                     cron_expr = " ".join(parts[:5])
+                    # System crontabs (cron.d) have a user field at position 5
+                    if source in ("cron.d", "crontab"):
+                        command = " ".join(parts[6:]) if len(parts) > 6 else ""
+                    else:
+                        command = " ".join(parts[5:])
                     safe_name = "cron-" + f.name.replace(".", "-")
-                    timer_content, service_content = _make_timer_service(safe_name, cron_expr, rel)
+                    timer_content, service_content = _make_timer_service(
+                        safe_name, cron_expr, rel, command=command,
+                    )
                     section.generated_timer_units.append({
                         "name": safe_name,
                         "timer_content": timer_content,
                         "service_content": service_content,
                         "cron_expr": cron_expr,
                         "source_path": rel,
+                        "command": command,
                     })
                     break
     except Exception:
