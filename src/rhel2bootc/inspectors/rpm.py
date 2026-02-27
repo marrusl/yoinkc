@@ -188,6 +188,39 @@ def _dnf_history_removed(executor: Executor, host_root: Path) -> List[str]:
     return removed
 
 
+def _rpm_dep_query(
+    executor: Executor, host_root: Path, tag: str,
+) -> str:
+    """Run a bulk rpm -qa --queryformat query for a dependency tag.
+
+    Tries --dbpath first, then --root with lock redirect.
+    Returns stdout or empty string on failure.
+    """
+    dbpath = str(host_root / "var" / "lib" / "rpm")
+    fmt = f"[%{{NAME}}\\t%{{{tag}}}\\n]"
+
+    cmd = ["rpm", "--dbpath", dbpath, "-qa", "--queryformat", fmt]
+    result = executor(cmd)
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout
+
+    _debug(f"dep-expand: --dbpath query for {tag} "
+           f"rc={result.returncode} stdout={len(result.stdout)} bytes, "
+           f"trying --root fallback")
+    cmd = [
+        "rpm", "--root", str(host_root),
+    ] + _RPM_LOCK_DEFINE + [
+        "-qa", "--queryformat", fmt,
+    ]
+    result = executor(cmd)
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout
+
+    _debug(f"dep-expand: --root query for {tag} also failed "
+           f"rc={result.returncode} stderr={result.stderr.strip()[:200]}")
+    return ""
+
+
 def _expand_baseline_deps(
     executor: Executor,
     host_root: Path,
@@ -197,47 +230,49 @@ def _expand_baseline_deps(
     """Expand the comps baseline by following transitive RPM dependencies.
 
     Uses two bulk queries against the local RPM database to build a
-    capability→package map and a package→requires map, then walks the
+    capability->package map and a package->requires map, then walks the
     graph from *seed_names* to collect every installed package that is
     a transitive dependency.
     """
-    dbpath = str(host_root / "var" / "lib" / "rpm")
-
-    # 1. capability → {package names that provide it}
-    cmd_prov = [
-        "rpm", "--dbpath", dbpath, "-qa",
-        "--queryformat", "[%{NAME}\\t%{PROVIDENAME}\\n]",
-    ]
-    prov_result = executor(cmd_prov)
-    if prov_result.returncode != 0:
-        _debug("dep-expand: rpm provides query failed, skipping expansion")
+    prov_stdout = _rpm_dep_query(executor, host_root, "PROVIDENAME")
+    if not prov_stdout:
+        _debug("dep-expand: no provides data, skipping expansion")
         return seed_names
 
     cap_to_pkgs: Dict[str, Set[str]] = defaultdict(set)
-    for line in prov_result.stdout.splitlines():
+    prov_lines = 0
+    for line in prov_stdout.splitlines():
         parts = line.split("\t", 1)
         if len(parts) == 2 and parts[0] in installed_names:
             cap_to_pkgs[parts[1]].add(parts[0])
+            prov_lines += 1
 
-    # 2. package → {capabilities it requires}
-    cmd_req = [
-        "rpm", "--dbpath", dbpath, "-qa",
-        "--queryformat", "[%{NAME}\\t%{REQUIRENAME}\\n]",
-    ]
-    req_result = executor(cmd_req)
-    if req_result.returncode != 0:
-        _debug("dep-expand: rpm requires query failed, skipping expansion")
+    _debug(f"dep-expand: parsed {prov_lines} provide entries "
+           f"for {len(cap_to_pkgs)} unique capabilities")
+    if prov_lines == 0:
+        raw_lines = prov_stdout.splitlines()[:5]
+        _debug(f"dep-expand: no matched provides; first 5 raw lines: {raw_lines}")
+        return seed_names
+
+    req_stdout = _rpm_dep_query(executor, host_root, "REQUIRENAME")
+    if not req_stdout:
+        _debug("dep-expand: no requires data, skipping expansion")
         return seed_names
 
     pkg_to_reqs: Dict[str, Set[str]] = defaultdict(set)
-    for line in req_result.stdout.splitlines():
+    req_lines = 0
+    for line in req_stdout.splitlines():
         parts = line.split("\t", 1)
         if len(parts) == 2 and parts[0] in installed_names:
             cap = parts[1]
             if not cap.startswith("rpmlib("):
                 pkg_to_reqs[parts[0]].add(cap)
+                req_lines += 1
 
-    # 3. BFS from seed packages
+    _debug(f"dep-expand: parsed {req_lines} require entries "
+           f"for {len(pkg_to_reqs)} packages")
+
+    # BFS from seed packages
     expanded = set(seed_names) & installed_names
     queue = list(expanded)
     while queue:
