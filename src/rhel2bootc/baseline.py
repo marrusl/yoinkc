@@ -5,6 +5,10 @@ Detects the host OS from /etc/os-release, maps to the corresponding bootc
 base image, and runs ``podman run --rm <image> rpm -qa --queryformat '%{NAME}\n'``
 to get the concrete package list.  The diff against host packages produces
 exactly the ``dnf install`` list the Containerfile needs.
+
+When running inside a container (the normal case), podman is not available
+directly. The tool uses ``nsenter -t 1 -m -u -i -n`` to execute podman in
+the host's namespaces.  This requires ``--pid=host`` on the outer container.
 """
 
 import os
@@ -19,6 +23,24 @@ _DEBUG = bool(os.environ.get("RHEL2BOOTC_DEBUG", ""))
 def _debug(msg: str) -> None:
     if _DEBUG:
         print(f"[rhel2bootc] baseline: {msg}", file=sys.stderr)
+
+
+def _run_on_host(executor, cmd: List[str]):
+    """Try running *cmd* directly, then via nsenter into the host namespaces.
+
+    Returns the RunResult from whichever attempt succeeds first (rc != 127).
+    If both fail, returns the nsenter result so callers see the better error.
+    """
+    result = executor(cmd)
+    if result.returncode != 127:
+        return result
+    _debug("direct execution failed (rc=127), trying nsenter into host namespaces")
+    nsenter_cmd = ["nsenter", "-t", "1", "-m", "-u", "-i", "-n", "--"] + cmd
+    _debug(f"nsenter cmd: {' '.join(nsenter_cmd)}")
+    result2 = executor(nsenter_cmd)
+    if result2.returncode == 127:
+        _debug("nsenter also failed (rc=127) — is --pid=host set on the container?")
+    return result2
 
 
 # ---------------------------------------------------------------------------
@@ -59,13 +81,14 @@ def query_base_image_packages(
     """Run ``podman run --rm <base_image> rpm -qa --queryformat '%{NAME}\\n'``.
 
     Returns the set of package names in the base image, or None on failure.
+    Uses nsenter to reach the host's podman when running inside a container.
     """
     cmd = [
         "podman", "run", "--rm", base_image,
         "rpm", "-qa", "--queryformat", r"%{NAME}\n",
     ]
     _debug(f"querying base image: {' '.join(cmd)}")
-    result = executor(cmd)
+    result = _run_on_host(executor, cmd)
     if result.returncode != 0:
         _debug(f"podman run failed (rc={result.returncode}): "
                f"{result.stderr.strip()[:300]}")
@@ -97,7 +120,7 @@ def query_base_image_presets(
         "bash", "-c", "cat /usr/lib/systemd/system-preset/*.preset 2>/dev/null || true",
     ]
     _debug(f"querying base image presets: {' '.join(cmd)}")
-    result = executor(cmd)
+    result = _run_on_host(executor, cmd)
     if result.returncode != 0:
         _debug(f"preset query failed (rc={result.returncode}): "
                f"{result.stderr.strip()[:200]}")

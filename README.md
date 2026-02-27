@@ -46,13 +46,14 @@ Run it against a host. **Typically you run the container on the host you are ins
 
 ```bash
 sudo podman run --rm \
+  --pid=host \
   --security-opt label=disable \
   -v /:/host:ro \
   -v ./rhel2bootc-output:/output:z \
   rhel2bootc --output-dir /output
 ```
 
-> **Note:** `--security-opt label=disable` turns off SELinux label enforcement for the container. The tool needs to read `/etc/passwd`, `/root/anaconda-ks.cfg`, systemd presets, and other files across the entire host filesystem. The container is a packaging convenience, not a security boundary — this is an admin inspection tool meant to run with full read access.
+> **Note:** `--pid=host` allows the tool to reach the host's `podman` (via `nsenter`) for querying the bootc base image package list. Without it, baseline generation falls back to all-packages mode. `--security-opt label=disable` turns off SELinux label enforcement. The tool needs broad read access across the host filesystem — the container is a packaging convenience, not a security boundary.
 
 After the run, `./rhel2bootc-output` on the host contains the Containerfile, config tree, reports, and snapshot. You can then copy that directory off the host or push it to GitHub with `--push-to-github`. The HTML report (`report.html`) is **self-contained and portable**: all content is embedded, so you can share or archive that file alone.
 
@@ -223,10 +224,12 @@ The generated Containerfile follows a deliberate layer order optimized for build
 
 The tool generates a package baseline by querying the target **bootc base image** directly. It detects the host OS from `/etc/os-release`, maps it to the corresponding base image (RHEL 9.x to `registry.redhat.io/rhel9/rhel-bootc:9.x`, CentOS Stream 9 to `quay.io/centos-bootc/centos-bootc:stream9`), and runs `podman run --rm <base-image> rpm -qa --queryformat '%{NAME}\n'` to get the concrete package list. The diff against host packages produces exactly the `dnf install` list the Containerfile needs.
 
+When running inside a container, the tool uses `nsenter` to execute `podman` in the host's namespaces. This requires `--pid=host` on the outer container (see the run command above). If `--pid=host` is not set, the tool falls back gracefully to all-packages mode.
+
 **Fallback behavior:**
 
 - **Base image queryable** — accurate package diff, only truly operator-added packages appear in the Containerfile
-- **Base image not available** — enters "all-packages mode" where every installed package is treated as operator-added (no baseline subtraction), with a clear warning in the reports
+- **Base image not available** (no `--pid=host`, or base image not pulled) — enters "all-packages mode" where every installed package is treated as operator-added (no baseline subtraction), with a clear warning in the reports
 - **Air-gapped environments** — use `--baseline-packages FILE` to provide a newline-separated list of package names, bypassing the podman query
 
 The resolved baseline (including the base image package list) is cached in the inspection snapshot, so `--from-snapshot` re-renders work without network access or podman.
