@@ -16,6 +16,9 @@ def _debug(msg: str) -> None:
     if _DEBUG:
         print(f"[rhel2bootc] rpm: {msg}", file=sys.stderr)
 
+from collections import defaultdict
+from typing import Dict
+
 from ..baseline import get_baseline_packages
 from ..executor import Executor
 from ..schema import (
@@ -185,6 +188,71 @@ def _dnf_history_removed(executor: Executor, host_root: Path) -> List[str]:
     return removed
 
 
+def _expand_baseline_deps(
+    executor: Executor,
+    host_root: Path,
+    seed_names: Set[str],
+    installed_names: Set[str],
+) -> Set[str]:
+    """Expand the comps baseline by following transitive RPM dependencies.
+
+    Uses two bulk queries against the local RPM database to build a
+    capability→package map and a package→requires map, then walks the
+    graph from *seed_names* to collect every installed package that is
+    a transitive dependency.
+    """
+    dbpath = str(host_root / "var" / "lib" / "rpm")
+
+    # 1. capability → {package names that provide it}
+    cmd_prov = [
+        "rpm", "--dbpath", dbpath, "-qa",
+        "--queryformat", "[%{NAME}\\t%{PROVIDENAME}\\n]",
+    ]
+    prov_result = executor(cmd_prov)
+    if prov_result.returncode != 0:
+        _debug("dep-expand: rpm provides query failed, skipping expansion")
+        return seed_names
+
+    cap_to_pkgs: Dict[str, Set[str]] = defaultdict(set)
+    for line in prov_result.stdout.splitlines():
+        parts = line.split("\t", 1)
+        if len(parts) == 2 and parts[0] in installed_names:
+            cap_to_pkgs[parts[1]].add(parts[0])
+
+    # 2. package → {capabilities it requires}
+    cmd_req = [
+        "rpm", "--dbpath", dbpath, "-qa",
+        "--queryformat", "[%{NAME}\\t%{REQUIRENAME}\\n]",
+    ]
+    req_result = executor(cmd_req)
+    if req_result.returncode != 0:
+        _debug("dep-expand: rpm requires query failed, skipping expansion")
+        return seed_names
+
+    pkg_to_reqs: Dict[str, Set[str]] = defaultdict(set)
+    for line in req_result.stdout.splitlines():
+        parts = line.split("\t", 1)
+        if len(parts) == 2 and parts[0] in installed_names:
+            cap = parts[1]
+            if not cap.startswith("rpmlib("):
+                pkg_to_reqs[parts[0]].add(cap)
+
+    # 3. BFS from seed packages
+    expanded = set(seed_names) & installed_names
+    queue = list(expanded)
+    while queue:
+        pkg = queue.pop()
+        for cap in pkg_to_reqs.get(pkg, ()):
+            for provider in cap_to_pkgs.get(cap, ()):
+                if provider not in expanded:
+                    expanded.add(provider)
+                    queue.append(provider)
+
+    _debug(f"dep-expand: {len(seed_names)} comps names -> "
+           f"{len(expanded)} after dependency resolution")
+    return expanded
+
+
 def run(
     host_root: Path,
     executor: Optional[Executor],
@@ -233,6 +301,11 @@ def run(
         installed_names = {p.name for p in installed}
         _debug(f"installed package count: {len(installed_names)}")
         if baseline_names is not None and not section.no_baseline:
+            # Expand comps baseline with transitive RPM dependencies
+            if executor is not None and baseline_names:
+                baseline_names = _expand_baseline_deps(
+                    executor, host_root, baseline_names, installed_names,
+                )
             added_names = installed_names - baseline_names
             removed_names = baseline_names - installed_names
             matched_names = installed_names & baseline_names

@@ -18,6 +18,10 @@ FIXTURES = Path(__file__).parent / "fixtures"
 def _fixture_executor(cmd, cwd=None):
     """Executor that returns fixture file content for known commands."""
     cmd_str = " ".join(cmd)
+    if "rpm" in cmd and "-qa" in cmd and "PROVIDENAME" in cmd_str:
+        return RunResult(stdout=(FIXTURES / "rpm_provides.txt").read_text(), stderr="", returncode=0)
+    if "rpm" in cmd and "-qa" in cmd and "REQUIRENAME" in cmd_str:
+        return RunResult(stdout=(FIXTURES / "rpm_requires.txt").read_text(), stderr="", returncode=0)
     if "rpm" in cmd and "-qa" in cmd:
         return RunResult(stdout=(FIXTURES / "rpm_qa_output.txt").read_text(), stderr="", returncode=0)
     if "rpm" in cmd and "-Va" in cmd:
