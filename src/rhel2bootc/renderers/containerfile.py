@@ -219,11 +219,52 @@ def _render_containerfile_content(snapshot: InspectionSnapshot) -> str:
     # 7. Non-RPM Software
     if snapshot.non_rpm_software and snapshot.non_rpm_software.items:
         lines.append("# === Non-RPM Software ===")
-        for i in snapshot.non_rpm_software.items[:20]:
-            path = i.get("path", i.get("name", ""))
-            provenance = i.get("provenance", "unknown")
+
+        pip_packages: list = []
+        remaining: list = []
+
+        for item in snapshot.non_rpm_software.items:
+            method = item.get("method", "")
+            if method == "pip dist-info" and item.get("version"):
+                pip_packages.append((item["name"], item["version"]))
+            elif method == "pip requirements.txt":
+                path = item.get("path", "")
+                lines.append(f"# FIXME: verify pip packages in /{path} install correctly from PyPI")
+                lines.append(f"COPY config/{path} /{path}")
+                lines.append(f"RUN pip install -r /{path}")
+            elif method == "npm package-lock.json":
+                path = item.get("path", "")
+                lines.append(f"# FIXME: verify npm packages in /{path} install correctly")
+                lines.append(f"COPY config/{path}/ /{path}/")
+                lines.append(f"RUN cd /{path} && npm ci")
+            elif method == "yarn.lock":
+                path = item.get("path", "")
+                lines.append(f"# FIXME: verify yarn packages in /{path} install correctly")
+                lines.append(f"COPY config/{path}/ /{path}/")
+                lines.append(f"RUN cd /{path} && yarn install --frozen-lockfile")
+            elif method == "gem Gemfile.lock":
+                path = item.get("path", "")
+                lines.append(f"# FIXME: verify Ruby gems in /{path} install correctly")
+                lines.append(f"COPY config/{path}/ /{path}/")
+                lines.append(f"RUN cd /{path} && bundle install")
+            else:
+                remaining.append(item)
+
+        if pip_packages:
+            pip_packages.sort()
+            lines.append(f"# Detected: {len(pip_packages)} pip package(s) via dist-info")
+            lines.append("# FIXME: verify these pip packages install correctly from PyPI")
+            lines.append("RUN pip install \\")
+            for name, ver in pip_packages[:-1]:
+                lines.append(f"    {name}=={ver} \\")
+            name, ver = pip_packages[-1]
+            lines.append(f"    {name}=={ver}")
+
+        for item in remaining[:20]:
+            path = item.get("path", item.get("name", ""))
             lines.append(f"# FIXME: unknown provenance — determine upstream source and installation method for /{path}")
             lines.append(f"# COPY config/{path} /{path}")
+
         lines.append("")
 
     # 8. Container Workloads (Quadlet)
