@@ -71,12 +71,20 @@ def _write_config_tree(snapshot: InspectionSnapshot, output_dir: Path) -> None:
     if snapshot.non_rpm_software and snapshot.non_rpm_software.items:
         for item in snapshot.non_rpm_software.items:
             path = item.get("path", "")
-            content = item.get("content", "")
-            if path and content:
+            # Items with a "files" dict (npm/yarn/gem lockfile dirs)
+            files = item.get("files")
+            if path and files and isinstance(files, dict):
+                rel = path.lstrip("/")
+                dest = config_dir / rel
+                dest.mkdir(parents=True, exist_ok=True)
+                for fname, fcontent in files.items():
+                    (dest / fname).write_text(fcontent)
+            # Items with simple "content" (requirements.txt, single files)
+            elif path and item.get("content", ""):
                 rel = path.lstrip("/")
                 dest = config_dir / rel
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_text(content)
+                dest.write_text(item["content"])
 
     # Kernel module / sysctl / dracut configs
     if snapshot.kernel_boot:

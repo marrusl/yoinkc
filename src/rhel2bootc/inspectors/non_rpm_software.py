@@ -112,8 +112,14 @@ def _scan_pip(section: NonRpmSoftwareSection, host_root: Path, executor: Optiona
                 if not site_packages.exists():
                     site_packages = parent
                 for dist_info in site_packages.glob("*.dist-info"):
-                    name = dist_info.name.rsplit("-", 1)[0] if "-" in dist_info.name else dist_info.name
-                    version = dist_info.name.rsplit("-", 1)[1].replace(".dist-info", "") if "-" in dist_info.name else ""
+                    stem = dist_info.name.replace(".dist-info", "")
+                    parts = stem.split("-")
+                    name, version = stem, ""
+                    for idx, part in enumerate(parts):
+                        if part and part[0].isdigit():
+                            name = "-".join(parts[:idx])
+                            version = "-".join(parts[idx:])
+                            break
                     section.items.append({
                         "path": str(dist_info.relative_to(host_root)),
                         "name": name,
@@ -131,18 +137,45 @@ def _scan_pip(section: NonRpmSoftwareSection, host_root: Path, executor: Optiona
         try:
             for req in d.rglob("requirements.txt"):
                 if req.is_file():
+                    try:
+                        content = req.read_text()
+                    except (PermissionError, OSError):
+                        content = ""
                     section.items.append({
                         "path": str(req.relative_to(host_root)),
                         "name": "requirements.txt",
                         "confidence": "high",
                         "method": "pip requirements.txt",
+                        "content": content,
                     })
         except Exception:
             continue
 
 
+_LOCKFILE_NAMES = frozenset({
+    "package.json", "package-lock.json", "yarn.lock",
+    "Gemfile", "Gemfile.lock",
+})
+
+
+def _read_lockfile_dir(d: Path) -> dict:
+    """Read lockfile-related files from a project directory.
+
+    Returns {filename: content} for files relevant to reproducible installs.
+    """
+    result: dict = {}
+    for name in _LOCKFILE_NAMES:
+        f = d / name
+        try:
+            if f.is_file():
+                result[name] = f.read_text()
+        except (PermissionError, OSError):
+            pass
+    return result
+
+
 def _scan_npm(section: NonRpmSoftwareSection, host_root: Path) -> None:
-    """Detect npm projects by scanning for package-lock.json."""
+    """Detect npm projects by scanning for package-lock.json and yarn.lock."""
     for search_root in ("opt", "srv", "home", "usr/local"):
         d = host_root / search_root
         if not d.exists():
@@ -150,19 +183,23 @@ def _scan_npm(section: NonRpmSoftwareSection, host_root: Path) -> None:
         try:
             for lock in d.rglob("package-lock.json"):
                 if lock.is_file():
+                    files = _read_lockfile_dir(lock.parent)
                     section.items.append({
                         "path": str(lock.parent.relative_to(host_root)),
                         "name": lock.parent.name,
                         "confidence": "high",
                         "method": "npm package-lock.json",
+                        "files": files,
                     })
             for lock in d.rglob("yarn.lock"):
                 if lock.is_file():
+                    files = _read_lockfile_dir(lock.parent)
                     section.items.append({
                         "path": str(lock.parent.relative_to(host_root)),
                         "name": lock.parent.name,
                         "confidence": "high",
                         "method": "yarn.lock",
+                        "files": files,
                     })
         except Exception:
             continue
@@ -177,11 +214,13 @@ def _scan_gem(section: NonRpmSoftwareSection, host_root: Path) -> None:
         try:
             for lock in d.rglob("Gemfile.lock"):
                 if lock.is_file():
+                    files = _read_lockfile_dir(lock.parent)
                     section.items.append({
                         "path": str(lock.parent.relative_to(host_root)),
                         "name": lock.parent.name,
                         "confidence": "high",
                         "method": "gem Gemfile.lock",
+                        "files": files,
                     })
         except Exception:
             continue
@@ -199,5 +238,14 @@ def run(
     _scan_pip(section, host_root, executor)
     _scan_npm(section, host_root)
     _scan_gem(section, host_root)
+
+    _CONFIDENCE_RANK = {"high": 2, "medium": 1, "low": 0}
+    seen: dict = {}
+    for item in section.items:
+        path = item.get("path", "")
+        rank = _CONFIDENCE_RANK.get(item.get("confidence", "low"), 0)
+        if path not in seen or rank > seen[path][1]:
+            seen[path] = (item, rank)
+    section.items = [v[0] for v in seen.values()]
 
     return section

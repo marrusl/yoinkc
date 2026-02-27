@@ -162,7 +162,22 @@ def test_non_rpm_software_inspector_with_fixtures(host_root, fixture_executor):
     from rhel2bootc.inspectors.non_rpm_software import run as run_non_rpm_software
     section = run_non_rpm_software(host_root, fixture_executor, deep_binary_scan=False)
     assert section is not None
-    assert any(i.get("path") == "opt/dummy" or i.get("name") == "dummy" for i in section.items)
+
+    methods = {i.get("method") for i in section.items}
+    # Unknown provenance (directory scan)
+    assert any(i.get("name") == "dummy" for i in section.items)
+    # pip dist-info with version
+    pip_items = [i for i in section.items if i.get("method") == "pip dist-info"]
+    assert len(pip_items) >= 2
+    flask = next((i for i in pip_items if i["name"] == "flask"), None)
+    assert flask is not None and flask["version"] == "2.3.2"
+    requests_ = next((i for i in pip_items if i["name"] == "requests"), None)
+    assert requests_ is not None and requests_["version"] == "2.31.0"
+    # npm with lockfile content
+    npm_items = [i for i in section.items if i.get("method") == "npm package-lock.json"]
+    assert len(npm_items) >= 1
+    assert npm_items[0]["name"] == "myapp"
+    assert "package-lock.json" in npm_items[0].get("files", {})
 
 
 def test_kernel_boot_inspector_with_fixtures(host_root, fixture_executor):

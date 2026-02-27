@@ -226,6 +226,38 @@ def test_containerfile_syntax_valid(snapshot_from_fixture):
         assert had_from, "Containerfile is missing a FROM instruction"
 
 
+def test_containerfile_non_rpm_provenance(snapshot_from_fixture):
+    """Non-RPM section emits real directives for known provenance, stubs for unknown."""
+    import re
+    env = _make_render_env()
+    with tempfile.TemporaryDirectory() as tmp:
+        output_dir = Path(tmp)
+        render_containerfile(snapshot_from_fixture, env, output_dir)
+        content = (output_dir / "Containerfile").read_text()
+
+        # pip dist-info: real RUN pip install (not commented out)
+        assert re.search(r"^RUN pip install", content, re.MULTILINE), \
+            "pip dist-info packages should produce a real RUN pip install line"
+        assert "flask==2.3.2" in content
+        assert "requests==2.31.0" in content
+
+        # npm lockfile: real COPY and RUN (not commented out)
+        assert re.search(r"^COPY config/opt/myapp/", content, re.MULTILINE), \
+            "npm lockfile should produce a real COPY directive"
+        assert re.search(r"^RUN cd /opt/myapp && npm ci", content, re.MULTILINE), \
+            "npm lockfile should produce a real RUN npm ci directive"
+        # lockfiles written to config tree
+        assert (output_dir / "config" / "opt" / "myapp" / "package-lock.json").exists()
+        assert (output_dir / "config" / "opt" / "myapp" / "package.json").exists()
+
+        # unknown provenance: commented-out COPY stub
+        assert re.search(r"^# COPY config/opt/dummy", content, re.MULTILINE), \
+            "unknown-provenance items should remain as commented-out stubs"
+        # no real (uncommented) COPY for opt/dummy
+        assert not re.search(r"^COPY config/opt/dummy", content, re.MULTILINE), \
+            "unknown-provenance items must not produce real COPY directives"
+
+
 def test_audit_report_renderer(snapshot_from_fixture):
     """Audit report renderer produces markdown with summary and sections."""
     env = _make_render_env()
