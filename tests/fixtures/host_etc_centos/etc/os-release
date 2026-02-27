@@ -1,0 +1,8 @@
+NAME="CentOS Stream"
+VERSION="9"
+ID=centos
+ID_LIKE="rhel fedora"
+VERSION_ID=9
+PLATFORM_ID="platform:el9"
+PRETTY_NAME="CentOS Stream 9"
+VARIANT_ID=stream

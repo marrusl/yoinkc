@@ -7,11 +7,22 @@ package name set for the RPM inspector.
 """
 
 import gzip
+import lzma
+import os
 import re
+import sys
 import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 import xml.etree.ElementTree as ET
+
+
+_DEBUG = bool(os.environ.get("RHEL2BOOTC_DEBUG", ""))
+
+
+def _debug(msg: str) -> None:
+    if _DEBUG:
+        print(f"[rhel2bootc] {msg}", file=sys.stderr)
 
 
 # Namespace commonly used in RHEL/CentOS comps
@@ -137,11 +148,10 @@ def detect_profile(host_root: Path) -> Optional[str]:
             text = path.read_text()
         except (PermissionError, OSError):
             continue
-        # Look for %packages section and @group or group name
         in_packages = False
         for line in text.splitlines():
             line = line.strip()
-            if line == "%packages":
+            if line == "%packages" or line.startswith("%packages "):
                 in_packages = True
                 continue
             if in_packages and line.startswith("%"):
@@ -156,27 +166,87 @@ def detect_profile(host_root: Path) -> Optional[str]:
     return None
 
 
-def _substitute_repo_vars(url: str, releasever: str, basearch: str) -> str:
-    """Replace $releasever, $basearch, and $stream in repo URL."""
+def _read_dnf_vars(host_root: Path) -> Dict[str, str]:
+    """Read all dnf variable files from {host_root}/etc/dnf/vars/.
+
+    Each file in that directory defines a variable: the filename is the variable
+    name and the first line of content is the value.  This is the standard DNF
+    variable mechanism used by RHEL, CentOS Stream, and Fedora.
+    """
+    result: Dict[str, str] = {}
+    vars_dir = host_root / "etc" / "dnf" / "vars"
+    try:
+        if not vars_dir.is_dir():
+            return result
+        for f in sorted(vars_dir.iterdir()):
+            if not f.is_file():
+                continue
+            try:
+                val = f.read_text().strip().splitlines()[0].strip()
+                if val:
+                    result[f.name] = val
+            except (IndexError, PermissionError, OSError):
+                continue
+    except (PermissionError, OSError):
+        pass
+    _debug(f"dnf vars from {vars_dir}: {result}")
+    return result
+
+
+def _infer_stream_var(host_root: Path, releasever: str) -> str:
+    """Synthesize a $stream value when /etc/dnf/vars/stream is absent.
+
+    CentOS Stream expects $stream = "<major>-stream".  We detect this from
+    os-release NAME or VARIANT_ID.  For plain RHEL/Fedora, fall back to the
+    major version number.
+    """
     major = releasever.split(".")[0] if releasever else releasever
-    return (
-        url.replace("$releasever", releasever)
-        .replace("$basearch", basearch)
-        .replace("$stream", major)
-    )
+    os_release = host_root / "etc" / "os-release"
+    try:
+        if os_release.exists():
+            text = os_release.read_text()
+            for line in text.splitlines():
+                if line.startswith("VARIANT_ID="):
+                    variant = line.split("=", 1)[1].strip().strip('"').lower()
+                    if variant == "stream":
+                        return f"{major}-stream"
+                if line.startswith("NAME="):
+                    name = line.split("=", 1)[1].strip().strip('"').lower()
+                    if "stream" in name:
+                        return f"{major}-stream"
+    except (PermissionError, OSError):
+        pass
+    return major
+
+
+def _substitute_repo_vars(
+    url: str,
+    releasever: str,
+    basearch: str,
+    dnf_vars: Optional[Dict[str, str]] = None,
+) -> str:
+    """Replace $releasever, $basearch, and any dnf vars ($stream, etc.) in a URL."""
+    url = url.replace("$releasever", releasever).replace("$basearch", basearch)
+    if dnf_vars:
+        for key, val in dnf_vars.items():
+            url = url.replace(f"${key}", val)
+    return url
 
 
 def _resolve_metalink(url: str) -> List[str]:
     """Fetch a metalink XML and extract mirror base URLs."""
+    _debug(f"metalink fetch: {url}")
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "rhel2bootc/1.0"})
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = resp.read()
-    except Exception:
+    except Exception as exc:
+        _debug(f"metalink fetch failed: {exc}")
         return []
     try:
         root = ET.fromstring(data)
-    except Exception:
+    except Exception as exc:
+        _debug(f"metalink XML parse failed: {exc}")
         return []
     urls: List[str] = []
     for el in root.iter():
@@ -184,35 +254,44 @@ def _resolve_metalink(url: str) -> List[str]:
         if tag == "url" and el.text:
             u = el.text.strip()
             if u.startswith("http"):
-                # Metalink URLs point to repodata/repomd.xml — strip to get base
                 if "/repodata/" in u:
                     u = u[:u.index("/repodata/")]
                 urls.append(u)
+    _debug(f"metalink resolved {len(urls)} mirror(s)")
     return urls
 
 
 def _resolve_mirrorlist(url: str) -> List[str]:
     """Fetch a mirrorlist (plain-text list of URLs) and return base URLs."""
+    _debug(f"mirrorlist fetch: {url}")
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "rhel2bootc/1.0"})
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = resp.read().decode("utf-8", errors="replace")
-    except Exception:
+    except Exception as exc:
+        _debug(f"mirrorlist fetch failed: {exc}")
         return []
     urls: List[str] = []
     for line in data.splitlines():
         line = line.strip()
         if line and not line.startswith("#") and line.startswith("http"):
             urls.append(line.rstrip("/"))
+    _debug(f"mirrorlist resolved {len(urls)} mirror(s)")
     return urls
 
 
 def _get_repo_baseurls(host_root: Path, releasever: str, basearch: str) -> List[str]:
-    """Read repo files under host_root and return resolved base URLs.
+    """Read .repo files under host_root/etc/yum.repos.d/ and return resolved base URLs.
 
     Handles baseurl, metalink, and mirrorlist directives.
     Only includes URLs from sections where enabled=1 or enabled is not set.
+    Reads dnf variable files from /etc/dnf/vars/ for $stream and other vars.
     """
+    dnf_vars = _read_dnf_vars(host_root)
+    if "stream" not in dnf_vars:
+        dnf_vars["stream"] = _infer_stream_var(host_root, releasever)
+        _debug(f"inferred $stream={dnf_vars['stream']} (no dnf var file)")
+
     urls: List[str] = []
     seen: set = set()
 
@@ -222,101 +301,138 @@ def _get_repo_baseurls(host_root: Path, releasever: str, basearch: str) -> List[
             seen.add(u)
             urls.append(u)
 
-    for subdir in ("etc/yum.repos.d", "etc/dnf"):
-        d = host_root / subdir
-        try:
-            if not d.exists():
-                continue
-            entries = sorted(d.iterdir())
-        except (PermissionError, OSError):
+    repo_dir = host_root / "etc" / "yum.repos.d"
+    try:
+        if not repo_dir.is_dir():
+            _debug(f"repo dir not found: {repo_dir}")
+            return urls
+        entries = sorted(repo_dir.iterdir())
+    except (PermissionError, OSError) as exc:
+        _debug(f"cannot read repo dir {repo_dir}: {exc}")
+        return urls
+
+    for f in entries:
+        if not f.is_file() or not f.name.endswith(".repo"):
             continue
-        for f in entries:
-            if not f.is_file():
-                continue
-            try:
-                content = f.read_text()
-            except Exception:
-                continue
-            section_enabled = True
-            section_baseurl = None
-            section_metalink = None
-            section_mirrorlist = None
+        _debug(f"parsing repo file: {f.name}")
+        try:
+            content = f.read_text()
+        except Exception:
+            continue
+        section_enabled = True
+        section_baseurl: Optional[str] = None
+        section_metalink: Optional[str] = None
+        section_mirrorlist: Optional[str] = None
+        section_name: str = ""
 
-            def _flush_section():
-                if not section_enabled:
-                    return
-                if section_baseurl:
-                    _add(section_baseurl)
-                    return
-                if section_metalink:
-                    for mu in _resolve_metalink(section_metalink)[:3]:
-                        _add(mu)
-                    return
-                if section_mirrorlist:
-                    for mu in _resolve_mirrorlist(section_mirrorlist)[:3]:
-                        _add(mu)
+        def _flush_section() -> None:
+            if not section_enabled:
+                _debug(f"  [{section_name}] disabled, skipping")
+                return
+            if section_baseurl:
+                _debug(f"  [{section_name}] baseurl -> {section_baseurl}")
+                _add(section_baseurl)
+                return
+            if section_metalink:
+                _debug(f"  [{section_name}] metalink -> {section_metalink}")
+                for mu in _resolve_metalink(section_metalink)[:3]:
+                    _add(mu)
+                return
+            if section_mirrorlist:
+                _debug(f"  [{section_name}] mirrorlist -> {section_mirrorlist}")
+                for mu in _resolve_mirrorlist(section_mirrorlist)[:3]:
+                    _add(mu)
 
-            for line in content.splitlines():
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if line.startswith("[") and line.endswith("]"):
-                    _flush_section()
-                    section_enabled = True
-                    section_baseurl = None
-                    section_metalink = None
-                    section_mirrorlist = None
-                    continue
-                if "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                k, v = k.strip().lower(), v.strip()
-                if k == "enabled" and v.lower() in ("0", "false", "no"):
-                    section_enabled = False
-                elif k == "baseurl":
-                    section_baseurl = _substitute_repo_vars(v, releasever, basearch)
-                elif k == "metalink":
-                    section_metalink = _substitute_repo_vars(v, releasever, basearch)
-                elif k == "mirrorlist":
-                    section_mirrorlist = _substitute_repo_vars(v, releasever, basearch)
-            _flush_section()
+        for line in content.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                _flush_section()
+                section_enabled = True
+                section_baseurl = None
+                section_metalink = None
+                section_mirrorlist = None
+                section_name = line[1:-1]
+                continue
+            if "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k, v = k.strip().lower(), v.strip()
+            if k == "enabled" and v.lower() in ("0", "false", "no"):
+                section_enabled = False
+            elif k == "baseurl":
+                section_baseurl = _substitute_repo_vars(v, releasever, basearch, dnf_vars)
+            elif k == "metalink":
+                section_metalink = _substitute_repo_vars(v, releasever, basearch, dnf_vars)
+            elif k == "mirrorlist":
+                section_mirrorlist = _substitute_repo_vars(v, releasever, basearch, dnf_vars)
+        _flush_section()
+
+    _debug(f"resolved {len(urls)} base URL(s) from repo files")
     return urls
 
 
 def _fetch_url(url: str, host_root: Path) -> Optional[bytes]:
     """Fetch URL; for file:// use host_root as base if path is relative."""
+    _debug(f"fetch: {url}")
     if url.startswith("file://"):
         path = Path(url[7:])
         if not path.is_absolute():
             path = host_root / path
         if path.exists():
-            return path.read_bytes()
+            data = path.read_bytes()
+            _debug(f"  file read OK ({len(data)} bytes)")
+            return data
+        _debug(f"  file not found: {path}")
         return None
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "rhel2bootc/1.0"})
         with urllib.request.urlopen(req, timeout=15) as resp:
-            return resp.read()
-    except Exception:
+            data = resp.read()
+            _debug(f"  HTTP {resp.status} ({len(data)} bytes)")
+            return data
+    except Exception as exc:
+        _debug(f"  fetch failed: {exc}")
         return None
 
 
+_GROUP_DATA_TYPES = ("group", "group_gz", "group_xz", "comps", "comps_gz", "comps_xz")
+
+
 def _find_group_href_in_repomd(repomd_xml: bytes) -> Optional[str]:
-    """Parse repomd.xml and return href for group or group_gz data, or None."""
+    """Parse repomd.xml and return href for group/comps data, or None.
+
+    Checks data types: group, group_gz, group_xz, comps, comps_gz, comps_xz.
+    Prefers uncompressed over compressed when multiple are present.
+    """
     root = ET.fromstring(repomd_xml)
+
     def local_tag(e: ET.Element) -> str:
         if isinstance(e.tag, str) and "}" in e.tag:
             return e.tag.split("}", 1)[1]
         return e.tag or ""
 
-    for data in root.iter():
-        if local_tag(data) != "data":
+    candidates: Dict[str, str] = {}
+    for data_el in root.iter():
+        if local_tag(data_el) != "data":
             continue
-        dtype = data.get("type") or ""
-        for c in data:
+        dtype = data_el.get("type") or ""
+        if dtype not in _GROUP_DATA_TYPES:
+            continue
+        for c in data_el:
             if local_tag(c) == "location":
                 href = c.get("href") or ""
-                if dtype in ("group", "group_gz", "comps", "comps_gz") and href:
-                    return href
+                if href:
+                    candidates[dtype] = href
+                    _debug(f"repomd: found <data type=\"{dtype}\"> -> {href}")
+
+    for preferred in _GROUP_DATA_TYPES:
+        if preferred in candidates:
+            _debug(f"repomd: selected type={preferred}")
+            return candidates[preferred]
+
+    _debug("repomd: no group/comps data found")
     return None
 
 
@@ -336,18 +452,23 @@ def fetch_comps_from_repos(
     if not basearch:
         basearch = _detect_basearch(host_root)
     releasever = version_id
+    _debug(f"fetch_comps: id={id_val} ver={version_id} arch={basearch}")
     baseurls = _get_repo_baseurls(host_root, releasever, basearch)
     if not baseurls:
+        _debug("fetch_comps: no base URLs resolved from repo files")
         return None
 
+    _debug(f"fetch_comps: trying {len(baseurls)} base URL(s)")
     for base in baseurls:
         base = base.rstrip("/")
         repomd_url = f"{base}/repodata/repomd.xml"
         raw = _fetch_url(repomd_url, host_root)
         if not raw:
+            _debug(f"  repomd.xml not available at {base}")
             continue
         href = _find_group_href_in_repomd(raw)
         if not href:
+            _debug(f"  no group/comps data in repomd.xml at {base}")
             continue
         if not href.startswith("http") and not href.startswith("file"):
             comps_url = f"{base}/{href}"
@@ -355,16 +476,31 @@ def fetch_comps_from_repos(
             comps_url = href
         comps_raw = _fetch_url(comps_url, host_root)
         if not comps_raw:
+            _debug(f"  comps XML fetch failed: {comps_url}")
             continue
-        if comps_url.endswith(".gz") or comps_raw[:2] == b"\x1f\x8b":
+        # Decompress if needed (gzip or xz)
+        if comps_url.endswith(".xz") or comps_raw[:6] == b"\xfd7zXZ\x00":
+            try:
+                comps_raw = lzma.decompress(comps_raw)
+                _debug("  decompressed xz comps data")
+            except Exception as exc:
+                _debug(f"  xz decompress failed: {exc}")
+                continue
+        elif comps_url.endswith(".gz") or comps_raw[:2] == b"\x1f\x8b":
             try:
                 comps_raw = gzip.decompress(comps_raw)
-            except Exception:
+                _debug("  decompressed gzip comps data")
+            except Exception as exc:
+                _debug(f"  gzip decompress failed: {exc}")
                 continue
         try:
-            return comps_raw.decode("utf-8", errors="replace")
-        except Exception:
+            xml_text = comps_raw.decode("utf-8", errors="replace")
+            _debug(f"  comps XML loaded ({len(xml_text)} chars)")
+            return xml_text
+        except Exception as exc:
+            _debug(f"  comps decode failed: {exc}")
             continue
+    _debug("fetch_comps: exhausted all base URLs without finding comps XML")
     return None
 
 

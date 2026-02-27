@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<repomd xmlns="http://linux.duke.edu/metadata/repo" xmlns:rpm="http://linux.duke.edu/metadata/rpm">
+  <revision>9-stream</revision>
+  <tags>
+    <distro cpeid="cpe:/o:centos-stream:centos-stream:9">CentOS Stream 9</distro>
+  </tags>
+  <data type="primary">
+    <checksum type="sha256">abc123-primary</checksum>
+    <location href="repodata/abc123-primary.xml.gz"/>
+    <timestamp>1700000000</timestamp>
+    <size>6808246</size>
+  </data>
+  <data type="group">
+    <checksum type="sha256">0146aeaae330eaf817af5ba661296dcf37ac224eac896064b853aeb8bafc48ef</checksum>
+    <location href="repodata/0146aeaae330eaf817af5ba661296dcf37ac224eac896064b853aeb8bafc48ef-comps-BaseOS.x86_64.xml"/>
+    <timestamp>1700000000</timestamp>
+    <size>288219</size>
+  </data>
+  <data type="group_xz">
+    <checksum type="sha256">93d3c6bada16e2567fe8f6d62c04cecd19d62c8020f8757800bbceb715dd7b0a</checksum>
+    <open-checksum type="sha256">0146aeaae330eaf817af5ba661296dcf37ac224eac896064b853aeb8bafc48ef</open-checksum>
+    <location href="repodata/93d3c6bada16e2567fe8f6d62c04cecd19d62c8020f8757800bbceb715dd7b0a-comps-BaseOS.x86_64.xml.xz"/>
+    <timestamp>1700000000</timestamp>
+    <size>55104</size>
+    <open-size>288219</open-size>
+  </data>
+</repomd>
