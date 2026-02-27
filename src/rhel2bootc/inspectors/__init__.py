@@ -95,12 +95,6 @@ from .selinux import run as run_selinux
 from .users_groups import run as run_users_groups
 
 
-def _tool_root() -> Path:
-    """Project root (where manifests/ lives)."""
-    # From .../src/rhel2bootc/inspectors/__init__.py -> .../ (project root)
-    return Path(__file__).resolve().parent.parent.parent.parent
-
-
 def _read_os_release(host_root: Path) -> Optional[OsRelease]:
     p = host_root / "etc" / "os-release"
     if not p.exists():
@@ -120,7 +114,7 @@ def _read_os_release(host_root: Path) -> Optional[OsRelease]:
     )
 
 
-def _validate_supported_host(os_release: Optional[OsRelease], tool_root: Path) -> Optional[str]:
+def _validate_supported_host(os_release: Optional[OsRelease]) -> Optional[str]:
     """Return error message if host is not supported, else None."""
     if not os_release or not os_release.version_id:
         return None
@@ -147,7 +141,6 @@ def _validate_supported_host(os_release: Optional[OsRelease], tool_root: Path) -
 def run_all(
     host_root: Path,
     executor: Optional[Executor] = None,
-    tool_root: Optional[Path] = None,
     config_diffs: bool = False,
     deep_binary_scan: bool = False,
     query_podman: bool = False,
@@ -157,8 +150,6 @@ def run_all(
     host_root = Path(host_root)
     if executor is None:
         executor = make_executor(str(host_root))
-    if tool_root is None:
-        tool_root = _tool_root()
 
     meta = {"host_root": str(host_root), "timestamp": datetime.utcnow().isoformat() + "Z"}
     hostname_path = host_root / "etc" / "hostname"
@@ -170,7 +161,7 @@ def run_all(
     except (PermissionError, OSError):
         pass
     os_release = _read_os_release(host_root)
-    err = _validate_supported_host(os_release, tool_root)
+    err = _validate_supported_host(os_release)
     if err:
         raise ValueError(err)
     snapshot = InspectionSnapshot(
@@ -179,7 +170,7 @@ def run_all(
     )
 
     w = snapshot.warnings
-    snapshot.rpm = _safe_run("rpm", lambda: run_rpm(host_root, executor, tool_root, baseline_packages_file=baseline_packages_file), None, w)
+    snapshot.rpm = _safe_run("rpm", lambda: run_rpm(host_root, executor, baseline_packages_file=baseline_packages_file), None, w)
     if snapshot.rpm and snapshot.rpm.no_baseline:
         w.append({
             "source": "rpm",
@@ -197,7 +188,7 @@ def run_all(
     if snapshot.rpm and snapshot.rpm.base_image and executor is not None:
         from ..baseline import query_base_image_presets
         base_image_preset_text = query_base_image_presets(executor, snapshot.rpm.base_image)
-    snapshot.services = _safe_run("service", lambda: run_service(host_root, executor, tool_root, base_image_preset_text=base_image_preset_text), None, w)
+    snapshot.services = _safe_run("service", lambda: run_service(host_root, executor, base_image_preset_text=base_image_preset_text), None, w)
     snapshot.network = _safe_run("network", lambda: run_network(host_root, executor), None, w)
     snapshot.storage = _safe_run("storage", lambda: run_storage(host_root, executor), None, w)
     snapshot.scheduled_tasks = _safe_run("scheduled_tasks", lambda: run_scheduled_tasks(host_root, executor), None, w)

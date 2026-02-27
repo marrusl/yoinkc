@@ -15,7 +15,6 @@ from rhel2bootc.redact import redact_snapshot
 from rhel2bootc.renderers import run_all as run_all_renderers
 
 FIXTURES = Path(__file__).parent / "fixtures"
-TOOL_ROOT = Path(__file__).parent.parent
 
 EXPECTED_OUTPUT_FILES = [
     "Containerfile",
@@ -56,7 +55,6 @@ def _run_full_pipeline(output_dir: Path) -> Path:
     snapshot = run_all_inspectors(
         host_root,
         executor=executor,
-        tool_root=TOOL_ROOT,
         config_diffs=False,
         deep_binary_scan=False,
         query_podman=False,
@@ -99,7 +97,6 @@ def test_full_pipeline_fixtures_end_to_end():
     snapshot = run_all_inspectors(
         host_root,
         executor=executor,
-        tool_root=TOOL_ROOT,
         config_diffs=False,
         deep_binary_scan=False,
         query_podman=False,

@@ -1,5 +1,0 @@
-[Unit]
-Description=nginx
-[Container]
-Image=quay.io/nginx
-[Service]

@@ -1,7 +1,0 @@
-[Unit]
-Description=Timer from cron etc/cron.d/hourly-job
-
-[Service]
-Type=oneshot
-ExecStart=/bin/true
-# FIXME: replace with actual command from cron

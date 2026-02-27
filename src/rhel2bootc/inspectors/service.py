@@ -191,7 +191,6 @@ def _scan_unit_files_from_fs(host_root: Path) -> Dict[str, str]:
 def run(
     host_root: Path,
     executor: Optional[Executor],
-    tool_root: Optional[Path] = None,
     base_image_preset_text: Optional[str] = None,
 ) -> ServiceSection:
     host_root = Path(host_root)

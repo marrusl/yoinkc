@@ -71,9 +71,8 @@ def snapshot_from_fixture():
             return RunResult(stdout="", stderr="", returncode=1)
 
         host_root = fixtures / "host_etc"
-        tool_root = Path(__file__).parent.parent
         from rhel2bootc.inspectors import run_all as run_inspectors
-        return run_inspectors(host_root, executor=exec_, tool_root=tool_root)
+        return run_inspectors(host_root, executor=exec_)
     return load_snapshot(snapshot_path)
 
 
@@ -506,9 +505,8 @@ def test_html_report_cards_and_tabs_link_to_sections():
         return RunResult(stdout="", stderr="", returncode=1)
 
     host_root = F / "host_etc"
-    tool_root = Path(__file__).parent.parent
     snapshot = run_inspectors(
-        host_root, executor=exec_, tool_root=tool_root,
+        host_root, executor=exec_,
         config_diffs=False, deep_binary_scan=False, query_podman=False,
     )
     snapshot = redact_snapshot(snapshot)

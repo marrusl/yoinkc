@@ -124,8 +124,7 @@ def test_parse_rpm_va():
 def test_rpm_inspector_with_fixtures(host_root, fixture_executor):
     """With executor that can query base image, baseline is applied via podman."""
     from rhel2bootc.inspectors.rpm import run as run_rpm
-    tool_root = Path(__file__).parent.parent
-    section = run_rpm(host_root, fixture_executor, tool_root)
+    section = run_rpm(host_root, fixture_executor)
     assert section is not None
     assert section.no_baseline is False
     assert section.baseline_package_names is not None
@@ -156,8 +155,7 @@ def test_rpm_inspector_with_baseline_file(host_root, fixture_executor):
 
 def test_service_inspector_with_fixtures(host_root, fixture_executor):
     from rhel2bootc.inspectors.service import run as run_service
-    tool_root = Path(__file__).parent.parent
-    section = run_service(host_root, fixture_executor, tool_root)
+    section = run_service(host_root, fixture_executor)
     assert section is not None
     assert any(s.unit == "httpd.service" and s.action == "enable" for s in section.state_changes)
     assert "httpd.service" in section.enabled_units
@@ -166,8 +164,7 @@ def test_service_inspector_with_fixtures(host_root, fixture_executor):
 def test_config_inspector_with_fixtures(host_root, fixture_executor):
     from rhel2bootc.inspectors.config import run as run_config
     from rhel2bootc.inspectors.rpm import run as run_rpm
-    tool_root = Path(__file__).parent.parent
-    rpm_section = run_rpm(host_root, fixture_executor, tool_root)
+    rpm_section = run_rpm(host_root, fixture_executor)
     rpm_owned = set((FIXTURES / "rpm_qla_output.txt").read_text().strip().splitlines())
     section = run_config(host_root, fixture_executor, rpm_section=rpm_section, rpm_owned_paths_override=rpm_owned)
     assert section is not None
@@ -495,11 +492,9 @@ def test_users_groups_inspector_with_fixtures(host_root, fixture_executor):
 
 def test_run_all_with_fixtures(host_root, fixture_executor):
     """Full run with base image query → baseline applied, all inspectors run."""
-    tool_root = Path(__file__).parent.parent
     snapshot = run_all(
         host_root,
         executor=fixture_executor,
-        tool_root=tool_root,
         config_diffs=False,
         deep_binary_scan=False,
         query_podman=False,
@@ -542,8 +537,7 @@ def test_run_all_no_baseline_warning(host_root):
             return RunResult(stdout=(FIXTURES / "systemctl_list_unit_files.txt").read_text(), stderr="", returncode=0)
         return RunResult(stdout="", stderr="", returncode=1)
 
-    tool_root = Path(__file__).parent.parent
-    snapshot = run_all(host_root, executor=failing_executor, tool_root=tool_root)
+    snapshot = run_all(host_root, executor=failing_executor)
     assert snapshot.rpm is not None
     assert snapshot.rpm.no_baseline is True
     rpm_warnings = [w for w in snapshot.warnings if w.get("source") == "rpm"]
@@ -555,11 +549,9 @@ def test_snapshot_roundtrip_with_baseline(host_root, fixture_executor):
     import tempfile
     from rhel2bootc.pipeline import load_snapshot, save_snapshot
     from rhel2bootc.renderers import run_all as run_all_renderers
-    tool_root = Path(__file__).parent.parent
     snapshot = run_all(
         host_root,
         executor=fixture_executor,
-        tool_root=tool_root,
         config_diffs=False,
         deep_binary_scan=False,
         query_podman=False,

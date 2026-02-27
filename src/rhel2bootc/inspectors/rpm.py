@@ -182,7 +182,6 @@ def _dnf_history_removed(executor: Executor, host_root: Path) -> List[str]:
 def run(
     host_root: Path,
     executor: Optional[Executor],
-    tool_root: Optional[Path] = None,
     baseline_packages_file: Optional[Path] = None,
 ) -> RpmSection:
     """Run RPM inspection.
