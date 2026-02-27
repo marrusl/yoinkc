@@ -190,16 +190,21 @@ def _dnf_history_removed(executor: Executor, host_root: Path) -> List[str]:
 
 _DEP_SCRIPT = """\
 import rpm, sys
+mode = sys.argv[1]
+if mode == 'P':
+    tags = [rpm.RPMTAG_PROVIDENAME]
+else:
+    tags = [rpm.RPMTAG_REQUIRENAME, rpm.RPMTAG_RECOMMENDNAME]
 ts = rpm.TransactionSet()
-tag = rpm.RPMTAG_PROVIDENAME if sys.argv[1] == 'P' else rpm.RPMTAG_REQUIRENAME
 mi = ts.dbMatch()
 for h in mi:
     name = h['name']
-    deps = h[tag]
-    if deps:
-        for dep in deps:
-            if dep and not dep.startswith('rpmlib('):
-                sys.stdout.write(name + '\\t' + dep + '\\n')
+    for tag in tags:
+        deps = h[tag]
+        if deps:
+            for dep in deps:
+                if dep and not dep.startswith('rpmlib('):
+                    sys.stdout.write(name + '\\t' + dep + '\\n')
 """
 
 
