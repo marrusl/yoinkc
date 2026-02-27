@@ -5,6 +5,7 @@ from pathlib import Path
 from jinja2 import Environment
 
 from ..schema import ConfigFileKind, InspectionSnapshot
+from ._triage import compute_triage
 
 
 def render(
@@ -28,6 +29,12 @@ def render(
     n_containers = 0
     if snapshot.containers:
         n_containers = len(snapshot.containers.quadlet_units or []) + len(snapshot.containers.compose_files or [])
+
+    triage = compute_triage(snapshot, output_dir)
+    lines.append(f"**{triage['automatic']}** items handled automatically &nbsp;|&nbsp; "
+                 f"**{triage['fixme']}** items with FIXME (need review) &nbsp;|&nbsp; "
+                 f"**{triage['manual']}** items need manual intervention")
+    lines.append("")
     if no_baseline:
         lines.append(f"- Packages (no baseline — all installed): {n_added}")
     else:

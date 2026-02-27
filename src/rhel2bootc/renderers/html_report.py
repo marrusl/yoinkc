@@ -234,8 +234,11 @@ def render(
     env: Environment,
     output_dir: Path,
 ) -> None:
+    from ._triage import compute_triage
+
     output_dir = Path(output_dir)
     counts = _summary_counts(snapshot)
+    triage = compute_triage(snapshot, output_dir)
     os_desc = snapshot.os_release.pretty_name or snapshot.os_release.name if snapshot.os_release else "Unknown"
     containerfile_content: str = ""
     containerfile_path = output_dir / "Containerfile"
@@ -335,9 +338,9 @@ th { color: var(--muted); font-weight: 500; }
 <h1>rhel2bootc Inspection Report</h1>
 <div class="banner">
   <strong>Host:</strong> """ + os_desc + """ &nbsp;|&nbsp;
-  <strong>Packages added:</strong> """ + str(counts["packages_added"]) + """ &nbsp;|&nbsp;
-  <strong>Config files:</strong> """ + str(counts["config_files"]) + """ &nbsp;|&nbsp;
-  <strong>Secrets redacted:</strong> """ + str(counts["redactions"]) + """ &nbsp;|&nbsp;
+  <span style="color:#3fb950">&#10003; """ + str(triage["automatic"]) + """ automatic</span> &nbsp;|&nbsp;
+  <span style="color:#d29922">&#9888; """ + str(triage["fixme"]) + """ FIXME</span> &nbsp;|&nbsp;
+  <span style="color:#f85149">&#9679; """ + str(triage["manual"]) + """ manual</span> &nbsp;|&nbsp;
   <strong>Warnings:</strong> <span id="banner-warning-count">""" + str(len(warnings)) + """</span>
 </div>
 """)
