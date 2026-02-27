@@ -157,17 +157,71 @@ def detect_profile(host_root: Path) -> Optional[str]:
 
 
 def _substitute_repo_vars(url: str, releasever: str, basearch: str) -> str:
-    """Replace $releasever and $basearch in repo URL."""
-    return url.replace("$releasever", releasever).replace("$basearch", basearch)
+    """Replace $releasever, $basearch, and $stream in repo URL."""
+    major = releasever.split(".")[0] if releasever else releasever
+    return (
+        url.replace("$releasever", releasever)
+        .replace("$basearch", basearch)
+        .replace("$stream", major)
+    )
+
+
+def _resolve_metalink(url: str) -> List[str]:
+    """Fetch a metalink XML and extract mirror base URLs."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "rhel2bootc/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = resp.read()
+    except Exception:
+        return []
+    try:
+        root = ET.fromstring(data)
+    except Exception:
+        return []
+    urls: List[str] = []
+    for el in root.iter():
+        tag = el.tag.split("}")[-1] if "}" in str(el.tag) else str(el.tag)
+        if tag == "url" and el.text:
+            u = el.text.strip()
+            if u.startswith("http"):
+                # Metalink URLs point to repodata/repomd.xml — strip to get base
+                if "/repodata/" in u:
+                    u = u[:u.index("/repodata/")]
+                urls.append(u)
+    return urls
+
+
+def _resolve_mirrorlist(url: str) -> List[str]:
+    """Fetch a mirrorlist (plain-text list of URLs) and return base URLs."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "rhel2bootc/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = resp.read().decode("utf-8", errors="replace")
+    except Exception:
+        return []
+    urls: List[str] = []
+    for line in data.splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and line.startswith("http"):
+            urls.append(line.rstrip("/"))
+    return urls
 
 
 def _get_repo_baseurls(host_root: Path, releasever: str, basearch: str) -> List[str]:
-    """Read repo files under host_root (e.g. /host/etc/yum.repos.d/) and return resolved base URLs.
+    """Read repo files under host_root and return resolved base URLs.
 
-    Only includes baseurl from sections where enabled=1 or enabled is not set.
-    Uses host repo config only — no hardcoded URLs.
+    Handles baseurl, metalink, and mirrorlist directives.
+    Only includes URLs from sections where enabled=1 or enabled is not set.
     """
     urls: List[str] = []
+    seen: set = set()
+
+    def _add(u: str) -> None:
+        u = u.rstrip("/")
+        if u and u not in seen:
+            seen.add(u)
+            urls.append(u)
+
     for subdir in ("etc/yum.repos.d", "etc/dnf"):
         d = host_root / subdir
         try:
@@ -184,20 +238,48 @@ def _get_repo_baseurls(host_root: Path, releasever: str, basearch: str) -> List[
             except Exception:
                 continue
             section_enabled = True
+            section_baseurl = None
+            section_metalink = None
+            section_mirrorlist = None
+
+            def _flush_section():
+                if not section_enabled:
+                    return
+                if section_baseurl:
+                    _add(section_baseurl)
+                    return
+                if section_metalink:
+                    for mu in _resolve_metalink(section_metalink)[:3]:
+                        _add(mu)
+                    return
+                if section_mirrorlist:
+                    for mu in _resolve_mirrorlist(section_mirrorlist)[:3]:
+                        _add(mu)
+
             for line in content.splitlines():
                 line = line.strip()
-                if line.startswith("[") and line.endswith("]"):
-                    section_enabled = True
+                if not line or line.startswith("#"):
                     continue
-                if "=" in line:
-                    k, v = line.split("=", 1)
-                    k, v = k.strip().lower(), v.strip()
-                    if k == "enabled" and v.lower() in ("0", "false", "no"):
-                        section_enabled = False
-                    elif k == "baseurl" and section_enabled:
-                        v = _substitute_repo_vars(v, releasever, basearch)
-                        if v and v not in urls:
-                            urls.append(v)
+                if line.startswith("[") and line.endswith("]"):
+                    _flush_section()
+                    section_enabled = True
+                    section_baseurl = None
+                    section_metalink = None
+                    section_mirrorlist = None
+                    continue
+                if "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k, v = k.strip().lower(), v.strip()
+                if k == "enabled" and v.lower() in ("0", "false", "no"):
+                    section_enabled = False
+                elif k == "baseurl":
+                    section_baseurl = _substitute_repo_vars(v, releasever, basearch)
+                elif k == "metalink":
+                    section_metalink = _substitute_repo_vars(v, releasever, basearch)
+                elif k == "mirrorlist":
+                    section_mirrorlist = _substitute_repo_vars(v, releasever, basearch)
+            _flush_section()
     return urls
 
 
