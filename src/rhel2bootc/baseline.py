@@ -68,37 +68,75 @@ def _parse_group_element(group_el: ET.Element) -> Tuple[Set[str], List[str]]:
     return packages, groupreqs
 
 
+def _parse_environment_element(env_el: ET.Element) -> List[str]:
+    """Extract mandatory group ids from an <environment> element."""
+    groups: List[str] = []
+
+    def find_one(parent: ET.Element, tag: str) -> Optional[ET.Element]:
+        for c in parent:
+            if c.tag == tag or (isinstance(c.tag, str) and c.tag.endswith("}" + tag)):
+                return c
+        return None
+
+    def find_all(parent: ET.Element, tag: str) -> List[ET.Element]:
+        out = []
+        for c in parent:
+            if c.tag == tag or (isinstance(c.tag, str) and c.tag.endswith("}" + tag)):
+                out.append(c)
+        return out
+
+    grouplist = find_one(env_el, "grouplist")
+    if grouplist is not None:
+        for gid_el in find_all(grouplist, "groupid"):
+            gid = (gid_el.text or "").strip()
+            if gid:
+                groups.append(gid)
+    return groups
+
+
 def parse_comps_xml(xml_content: str) -> Dict[str, Tuple[Set[str], List[str]]]:
     """
-    Parse comps XML and return a map: group_id -> (package_names_set, groupreq_ids).
+    Parse comps XML and return a map: id -> (package_names_set, group_dependency_ids).
+
+    Parses both <group> and <environment> elements. Environments are added to the
+    same dict with their mandatory groups as dependencies, so
+    resolve_baseline_packages() follows the full chain automatically.
 
     Only mandatory and default packages are included. Optional packages are excluded.
     """
     root = ET.fromstring(xml_content)
-    # Strip default namespace for simpler local-name matching
+
     def local_tag(e: ET.Element) -> str:
         if isinstance(e.tag, str) and "}" in e.tag:
             return e.tag.split("}", 1)[1]
         return e.tag or ""
 
+    def find_id(parent: ET.Element) -> Optional[str]:
+        for c in parent:
+            if local_tag(c) == "id":
+                return (c.text or "").strip() or None
+        return None
+
     result: Dict[str, Tuple[Set[str], List[str]]] = {}
 
-    for group_el in root.iter():
-        if local_tag(group_el) != "group":
-            continue
-        id_el = None
-        for c in group_el:
-            if local_tag(c) == "id":
-                id_el = c
-                break
-        if id_el is None:
-            continue
-        gid = (id_el.text or "").strip()
-        if not gid:
-            continue
-        packages, groupreqs = _parse_group_element(group_el)
-        result[gid] = (packages, groupreqs)
+    for el in root.iter():
+        tag = local_tag(el)
+        if tag == "group":
+            gid = find_id(el)
+            if not gid:
+                continue
+            packages, groupreqs = _parse_group_element(el)
+            result[gid] = (packages, groupreqs)
+        elif tag == "environment":
+            eid = find_id(el)
+            if not eid:
+                continue
+            env_groups = _parse_environment_element(el)
+            result[eid] = (set(), env_groups)
+            _debug(f"comps: environment '{eid}' -> groups {env_groups}")
 
+    _debug(f"comps: parsed {len([k for k, v in result.items() if v[0]])} groups, "
+           f"{len([k for k, v in result.items() if not v[0] and v[1]])} environments")
     return result
 
 
@@ -550,6 +588,33 @@ def _detect_basearch(host_root: Path) -> str:
     return platform.machine() or "x86_64"
 
 
+def _resolve_profile_id(
+    comps_data: Dict[str, Tuple[Set[str], List[str]]],
+    profile: Optional[str],
+) -> Optional[str]:
+    """Map a user-facing profile name to its comps id.
+
+    Tries, in order:
+      1. Exact match (e.g. "core", "server-product-environment")
+      2. "{profile}-environment" (e.g. "minimal" -> "minimal-environment")
+      3. "{profile}-product-environment" (e.g. "server" -> "server-product-environment")
+    Returns the first match found in comps_data, or None.
+    """
+    if not profile:
+        return None
+    candidates = [
+        profile,
+        f"{profile}-environment",
+        f"{profile}-product-environment",
+    ]
+    for c in candidates:
+        if c in comps_data:
+            _debug(f"_resolve_profile_id: '{profile}' matched '{c}'")
+            return c
+    _debug(f"_resolve_profile_id: '{profile}' not found in comps data")
+    return None
+
+
 def get_baseline_packages(
     host_root: Path,
     os_id: str,
@@ -587,9 +652,13 @@ def get_baseline_packages(
         _debug(f"using --profile override: {profile}")
     else:
         profile = detect_profile(host_root)
-    if profile is None or profile not in comps_data:
-        _debug(f"profile '{profile}' not in comps data, falling back to 'minimal'")
-        profile = "minimal"
-    baseline = resolve_baseline_packages(comps_data, profile)
-    _debug(f"baseline resolved: profile={profile}, {len(baseline)} packages")
-    return (baseline, profile, False)
+
+    resolved_id = _resolve_profile_id(comps_data, profile)
+    if not resolved_id:
+        resolved_id = _resolve_profile_id(comps_data, "minimal")
+    if not resolved_id:
+        resolved_id = "core"
+    _debug(f"profile '{profile}' resolved to comps id '{resolved_id}'")
+    baseline = resolve_baseline_packages(comps_data, resolved_id)
+    _debug(f"baseline resolved: profile={resolved_id}, {len(baseline)} packages")
+    return (baseline, profile or resolved_id, False)
