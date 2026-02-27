@@ -556,6 +556,7 @@ def get_baseline_packages(
     version_id: str,
     comps_file: Optional[Path] = None,
     basearch: str = "",
+    profile_override: Optional[str] = None,
 ) -> Tuple[Optional[Set[str]], Optional[str], bool]:
     """
     Resolve baseline package set and profile used.
@@ -563,7 +564,7 @@ def get_baseline_packages(
     Returns (baseline_names, profile_used, no_baseline).
     - If comps_file is set: load and parse from file.
     - Else: try fetch_comps_from_repos.
-    - If we have comps: detect_profile or "minimal", resolve and return (set, profile, False).
+    - If we have comps: use profile_override, detect_profile, or "minimal" fallback.
     - If no comps: return (None, None, True) for all-packages mode.
     """
     if not basearch:
@@ -581,8 +582,14 @@ def get_baseline_packages(
         return (None, None, True)
 
     comps_data = parse_comps_xml(xml_content)
-    profile = detect_profile(host_root)
+    if profile_override:
+        profile = profile_override.lstrip("@")
+        _debug(f"using --profile override: {profile}")
+    else:
+        profile = detect_profile(host_root)
     if profile is None or profile not in comps_data:
+        _debug(f"profile '{profile}' not in comps data, falling back to 'minimal'")
         profile = "minimal"
     baseline = resolve_baseline_packages(comps_data, profile)
+    _debug(f"baseline resolved: profile={profile}, {len(baseline)} packages")
     return (baseline, profile, False)

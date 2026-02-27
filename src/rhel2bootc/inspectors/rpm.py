@@ -166,6 +166,7 @@ def run(
     executor: Optional[Executor],
     tool_root: Optional[Path] = None,
     comps_file: Optional[Path] = None,
+    profile_override: Optional[str] = None,
 ) -> RpmSection:
     """
     Run RPM inspection. Baseline is from comps XML (--comps-file or fetch from repos);
@@ -192,7 +193,8 @@ def run(
     section.no_baseline = False
     if id_val and version_id:
         baseline_set, _profile_used, no_baseline = get_baseline_packages(
-            host_root, id_val, version_id, comps_file=comps_file
+            host_root, id_val, version_id, comps_file=comps_file,
+            profile_override=profile_override,
         )
         if no_baseline:
             section.no_baseline = True

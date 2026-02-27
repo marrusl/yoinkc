@@ -131,6 +131,7 @@ def run_all(
     deep_binary_scan: bool = False,
     query_podman: bool = False,
     comps_file: Optional[Path] = None,
+    profile_override: Optional[str] = None,
 ) -> InspectionSnapshot:
     """Run all inspectors and return a merged snapshot."""
     host_root = Path(host_root)
@@ -154,12 +155,13 @@ def run_all(
         meta=meta,
         os_release=os_release,
     )
-    profile_warn = _profile_warning(host_root)
-    if profile_warn:
-        snapshot.warnings.append({"source": "rpm", "message": profile_warn, "severity": "warning"})
+    if not profile_override:
+        profile_warn = _profile_warning(host_root)
+        if profile_warn:
+            snapshot.warnings.append({"source": "rpm", "message": profile_warn, "severity": "warning"})
 
     w = snapshot.warnings
-    snapshot.rpm = _safe_run("rpm", lambda: run_rpm(host_root, executor, tool_root, comps_file=comps_file), None, w)
+    snapshot.rpm = _safe_run("rpm", lambda: run_rpm(host_root, executor, tool_root, comps_file=comps_file, profile_override=profile_override), None, w)
     if snapshot.rpm and snapshot.rpm.no_baseline:
         w.append({
             "source": "rpm",

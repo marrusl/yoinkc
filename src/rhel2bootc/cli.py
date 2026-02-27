@@ -47,6 +47,13 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         metavar="FILE",
         help="Path to local comps XML for baseline generation (air-gapped environments)",
     )
+    parser.add_argument(
+        "--profile",
+        type=str,
+        metavar="NAME",
+        help="Override install profile for baseline (e.g. server, minimal, workstation). "
+             "Bypasses auto-detection from kickstart files.",
+    )
 
     # Opt-in deeper inspection (design doc)
     parser.add_argument(

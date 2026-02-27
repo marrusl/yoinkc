@@ -173,6 +173,7 @@ Each inspector examines one aspect of the host and contributes a section to the 
 | Flag | Description |
 |------|-------------|
 | `--comps-file FILE` | Path to local comps XML for baseline generation (air-gapped environments) |
+| `--profile NAME` | Override install profile for baseline (e.g. `server`, `minimal`, `workstation`); bypasses kickstart auto-detection |
 | `--config-diffs` | Generate line-by-line diffs for modified configs via `rpm2cpio` |
 | `--deep-binary-scan` | Full `strings` scan on unknown binaries for version detection (slow) |
 | `--query-podman` | Connect to podman to enumerate running containers with full inspect data |
@@ -218,5 +219,10 @@ The tool dynamically generates a package baseline by fetching the distribution's
 - **No profile detected** — falls back to `@minimal` with a warning
 - **No network / no comps available** — enters "all-packages mode" where every installed package is treated as operator-added (no baseline subtraction), with a clear warning in the reports
 - **Air-gapped environments** — use `--comps-file` to provide a local comps XML, bypassing all network access
+
+**Profile detection and SELinux:** The tool auto-detects the install profile from `/root/anaconda-ks.cfg`. When running in a container, SELinux may prevent access to `/host/root/` even with `:ro` bind mounts. If you see the "Could not determine original install profile" warning, you have two options:
+
+- Use `--profile server` (or `minimal`, `workstation`, etc.) to specify the profile directly
+- Add `--security-opt label=disable` to the `podman run` command to allow full host filesystem access
 
 The resolved baseline is cached in the inspection snapshot, so `--from-snapshot` re-renders work without network access.
