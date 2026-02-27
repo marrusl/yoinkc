@@ -3,22 +3,36 @@ Service inspector: systemd unit state vs baseline (enabled/disabled/masked).
 Baseline is derived from systemd preset files on the host, not static manifests.
 """
 
+import fnmatch
+import os
+import sys
 from pathlib import Path
-from typing import Dict, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from ..executor import Executor
 from ..schema import ServiceSection, ServiceStateChange
 
+_DEBUG = bool(os.environ.get("RHEL2BOOTC_DEBUG", ""))
 
-def _parse_preset_files(host_root: Path) -> Tuple[Set[str], Set[str]]:
+
+def _debug(msg: str) -> None:
+    if _DEBUG:
+        print(f"[rhel2bootc] service: {msg}", file=sys.stderr)
+
+
+def _parse_preset_files(host_root: Path) -> Tuple[Set[str], Set[str], bool]:
     """Parse systemd preset files to determine default-enabled and default-disabled services.
 
     Reads from /usr/lib/systemd/system-preset/ (vendor) and /etc/systemd/system-preset/ (admin),
     with /etc overriding /usr/lib (higher-priority presets come first).
+    Returns (default_enabled, default_disabled, has_disable_all).
+    has_disable_all indicates a 'disable *' catch-all was found.
     """
     default_enabled: Set[str] = set()
     default_disabled: Set[str] = set()
     already_matched: Set[str] = set()
+    has_disable_all = False
+    glob_rules: List[Tuple[str, str]] = []
 
     preset_dirs = [
         host_root / "etc/systemd/system-preset",
@@ -26,15 +40,19 @@ def _parse_preset_files(host_root: Path) -> Tuple[Set[str], Set[str]]:
     ]
     all_files = []
     for d in preset_dirs:
-        if d.exists():
-            try:
-                entries = sorted(d.iterdir())
-            except (PermissionError, OSError):
-                entries = []
-            for f in entries:
-                if f.is_file() and f.suffix == ".preset":
-                    all_files.append(f)
+        try:
+            if not d.exists():
+                _debug(f"preset dir not found: {d}")
+                continue
+            entries = sorted(d.iterdir())
+        except (PermissionError, OSError) as exc:
+            _debug(f"preset dir not accessible: {d}: {exc}")
+            entries = []
+        for f in entries:
+            if f.is_file() and f.suffix == ".preset":
+                all_files.append(f)
 
+    _debug(f"found {len(all_files)} preset files")
     for preset_file in all_files:
         try:
             for line in preset_file.read_text().splitlines():
@@ -47,7 +65,10 @@ def _parse_preset_files(host_root: Path) -> Tuple[Set[str], Set[str]]:
                 action = parts[0].lower()
                 pattern = parts[1]
 
-                if pattern.endswith("*"):
+                if "*" in pattern or "?" in pattern:
+                    if pattern == "*" and action == "disable":
+                        has_disable_all = True
+                    glob_rules.append((action, pattern))
                     continue
 
                 if pattern in already_matched:
@@ -61,7 +82,10 @@ def _parse_preset_files(host_root: Path) -> Tuple[Set[str], Set[str]]:
         except Exception:
             continue
 
-    return default_enabled, default_disabled
+    _debug(f"presets: {len(default_enabled)} explicit enable, "
+           f"{len(default_disabled)} explicit disable, "
+           f"disable_all={has_disable_all}, {len(glob_rules)} glob rules")
+    return default_enabled, default_disabled, has_disable_all
 
 
 def _parse_systemctl_list_unit_files(stdout: str) -> Dict[str, str]:
@@ -90,22 +114,38 @@ def run(
     cmd = ["systemctl", "list-unit-files", "--no-pager", "--no-legend"]
     if str(host_root) != "/":
         cmd = ["systemctl", "--root", str(host_root), "list-unit-files", "--no-pager", "--no-legend"]
+    _debug(f"running: {' '.join(cmd)}")
     result = executor(cmd)
+    _debug(f"returncode={result.returncode}, stdout={len(result.stdout)} bytes, stderr={result.stderr[:200] if result.stderr else ''}")
     if result.returncode != 0:
+        _debug("systemctl failed, returning empty section")
         return section
 
     current = _parse_systemctl_list_unit_files(result.stdout)
-    default_enabled, default_disabled = _parse_preset_files(host_root)
+    _debug(f"parsed {len(current)} unit files from systemctl output")
+    if _DEBUG and current:
+        sample = list(current.items())[:5]
+        _debug(f"sample: {sample}")
+
+    default_enabled, default_disabled, has_disable_all = _parse_preset_files(host_root)
 
     for unit, state in current.items():
         if not unit.endswith(".service") and not unit.endswith(".timer"):
             continue
-        default_state = "enabled" if unit in default_enabled else ("disabled" if unit in default_disabled else "unknown")
+        if unit in default_enabled:
+            default_state = "enabled"
+        elif unit in default_disabled:
+            default_state = "disabled"
+        elif has_disable_all:
+            default_state = "disabled"
+        else:
+            default_state = "unknown"
+
         action = "unchanged"
-        if state == "enabled" and unit not in default_enabled:
+        if state == "enabled" and default_state != "enabled":
             action = "enable"
             section.enabled_units.append(unit)
-        elif state == "disabled" and unit in default_enabled:
+        elif state == "disabled" and default_state == "enabled":
             action = "disable"
             section.disabled_units.append(unit)
         elif state == "masked":
@@ -119,4 +159,7 @@ def run(
             )
         )
 
+    _debug(f"result: {len(section.enabled_units)} enabled changes, "
+           f"{len(section.disabled_units)} disabled changes, "
+           f"{len(section.state_changes)} total tracked")
     return section
