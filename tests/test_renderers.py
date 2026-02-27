@@ -339,16 +339,33 @@ def test_html_report_renderer(snapshot_from_fixture):
 
 
 def test_readme_renderer(snapshot_from_fixture):
-    """README renderer produces README.md with build/deploy commands."""
+    """README renderer produces README.md with summary, build/deploy commands, and FIXME list."""
     env = _make_render_env()
     with tempfile.TemporaryDirectory() as tmp:
         output_dir = Path(tmp)
+        # Render Containerfile first so _extract_fixmes can read it
+        render_containerfile(snapshot_from_fixture, env, output_dir)
         render_readme(snapshot_from_fixture, env, output_dir)
         path = output_dir / "README.md"
         assert path.exists()
         content = path.read_text()
-        assert "podman build" in content
-        assert "rhel2bootc" in content or "output" in content
+        # Summary table
+        assert "Findings summary" in content
+        assert "Packages" in content
+        assert "Configs modified" in content
+        assert "Services changed" in content
+        assert "Warnings" in content
+        assert "FIXME items" in content
+        # Build command
+        assert "podman build -t my-bootc-image:latest ." in content
+        # Deploy commands
+        assert "bootc switch" in content
+        assert "bootc install to-disk" in content
+        # Artifacts table
+        assert "audit-report.md" in content
+        assert "report.html" in content
+        # FIXME list extracted from Containerfile
+        assert "FIXME" in content
 
 
 def test_kickstart_renderer(snapshot_from_fixture):
