@@ -26,21 +26,17 @@ def _debug(msg: str) -> None:
 
 
 def _run_on_host(executor, cmd: List[str]):
-    """Try running *cmd* directly, then via nsenter into the host namespaces.
+    """Run *cmd* on the host via nsenter into PID 1's namespaces.
 
-    Returns the RunResult from whichever attempt succeeds first (rc != 127).
-    If both fail, returns the nsenter result so callers see the better error.
+    Requires ``--pid=host`` and ``--privileged`` (or equivalent capabilities)
+    on the outer container.
     """
-    result = executor(cmd)
-    if result.returncode != 127:
-        return result
-    _debug("direct execution failed (rc=127), trying nsenter into host namespaces")
     nsenter_cmd = ["nsenter", "-t", "1", "-m", "-u", "-i", "-n", "--"] + cmd
     _debug(f"nsenter cmd: {' '.join(nsenter_cmd)}")
-    result2 = executor(nsenter_cmd)
-    if result2.returncode == 127:
-        _debug("nsenter also failed (rc=127) — is --pid=host set on the container?")
-    return result2
+    result = executor(nsenter_cmd)
+    if result.returncode == 127:
+        _debug("nsenter failed (rc=127) — is --pid=host set on the container?")
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -84,14 +80,14 @@ def query_base_image_packages(
     Uses nsenter to reach the host's podman when running inside a container.
     """
     cmd = [
-        "podman", "run", "--rm", base_image,
+        "podman", "run", "--rm", "--cgroups=disabled", base_image,
         "rpm", "-qa", "--queryformat", r"%{NAME}\n",
     ]
     _debug(f"querying base image: {' '.join(cmd)}")
     result = _run_on_host(executor, cmd)
     if result.returncode != 0:
         _debug(f"podman run failed (rc={result.returncode}): "
-               f"{result.stderr.strip()[:300]}")
+               f"{result.stderr.strip()[:800]}")
         return None
     names: Set[str] = set()
     for line in result.stdout.splitlines():
@@ -116,7 +112,7 @@ def query_base_image_presets(
     files, or None on failure.
     """
     cmd = [
-        "podman", "run", "--rm", base_image,
+        "podman", "run", "--rm", "--cgroups=disabled", base_image,
         "bash", "-c", "cat /usr/lib/systemd/system-preset/*.preset 2>/dev/null || true",
     ]
     _debug(f"querying base image presets: {' '.join(cmd)}")
